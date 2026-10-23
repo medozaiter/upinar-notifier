@@ -21,44 +21,23 @@ if sys.stdout:
         pass
 
 from telegram_notifier import send_telegram_message
+from upinar_engine import get_enrolled_courses, create_robust_session, login_flow, is_logged_in_upinar, load_session
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-SESSION_FILE = os.path.join(BASE_DIR, "session_cookies.json")
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-}
 
 def load_config() -> dict:
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def get_authenticated_session() -> requests.Session:
-    """
-    Returns an active session, performing SSO login if needed.
-    """
-    s = requests.Session()
-    s.headers.update(HEADERS)
-    
-    # Try saved cookies
-    if os.path.exists(SESSION_FILE):
-        try:
-            with open(SESSION_FILE, "r", encoding="utf-8") as f:
-                s.cookies.update(json.load(f))
-            r = s.get("https://upinar.edu.ps/my/", timeout=40)
-            if "login" not in r.url.lower() and ("sesskey" in r.text or "user-menu" in r.text):
-                print("[Auth] Using valid saved session.")
-                return s
-        except:
-            pass
+    s = create_robust_session()
+    if load_session(s) and is_logged_in_upinar(s):
+        print("[Auth] Using valid saved session.")
+        return s
 
-    # Fresh login
     print("[Auth] Performing fresh login via Portal SSO...")
     cfg = load_config()
-    from upinar_engine import login_flow
     login_flow(s, cfg["student_id"], cfg["password"])
     return s
 
@@ -69,52 +48,29 @@ def generate_full_inventory():
 
     s = get_authenticated_session()
 
-    print("[Report] Scanning dashboard for courses...")
-    r_my = s.get("https://upinar.edu.ps/my/", timeout=45)
-    soup_my = BeautifulSoup(r_my.text, 'html.parser')
-
-    # Find all course links
-    found_cids = set()
-    courses_to_scan = []
-
-    for a in soup_my.find_all('a', href=re.compile(r'/course/view\.php\?id=\d+')):
-        m = re.search(r'id=(\d+)', a['href'])
-        if not m:
-            continue
-        cid = m.group(1)
-        if cid == "1" or cid in found_cids:
-            continue
-        found_cids.add(cid)
-        courses_to_scan.append(cid)
-
-    print(f"[Report] Found {len(courses_to_scan)} course IDs to inspect: {courses_to_scan}")
+    courses = get_enrolled_courses(s)
+    if not courses:
+        print("[Report Notice] No courses found.")
+        return
 
     # Intro message to Telegram
     send_telegram_message(
         bot_token, chat_id,
         f"📊 <b>تقرير الجرد الشامل لمساقات اليوبينار</b>\n"
         f"🎓 جامعة فلسطين - UPINAR\n"
+        f"📚 تم العثور على <b>{len(courses)} مساقات نشطة</b> في حسابك\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"جاري إرسال تفاصيل المحاضرات والواجبات والشباتر لكل مساق..."
     )
 
-    for cid in sorted(courses_to_scan):
-        course_url = f"https://upinar.edu.ps/course/view.php?id={cid}"
-        print(f"[Report] Inspecting course ID {cid}...")
+    for course in courses:
+        cid = course["id"]
+        course_url = course["url"]
+        course_title = course["title"]
+        print(f"[Report] Inspecting course: {course_title} (ID: {cid})...")
         try:
             r = s.get(course_url, timeout=45)
             soup = BeautifulSoup(r.text, 'html.parser')
-
-            # Real Course Title
-            h1 = soup.find('h1')
-            course_title = h1.get_text(strip=True) if h1 else f"Course #{cid}"
-
-            # If title is just frontpage or generic, check breadcrumb
-            breadcrumb = soup.find('nav', {'aria-label': re.compile(r'(breadcrumb|navigation)', re.I)})
-            if breadcrumb:
-                crumbs = [c.get_text(strip=True) for c in breadcrumb.find_all('li')]
-                if len(crumbs) >= 3:
-                    course_title = crumbs[-1]
 
             assignments = []
             quizzes = []
@@ -133,10 +89,13 @@ def generate_full_inventory():
                     continue
                 seen_ids.add(mid)
 
-                # Clean Title
+                for hide in a.find_all(class_=re.compile(r'(accesshide|sr-only|badge)')):
+                    hide.decompose()
+
                 instance = a.find(class_=re.compile(r'(instancename|activityname)'))
                 title_text = instance.get_text(strip=True) if instance else a.get_text(strip=True)
-                title_text = re.sub(r'^(Assignment|File|Folder|Quiz|URL|Forum)\s*', '', title_text, flags=re.IGNORECASE).strip()
+                title_text = re.sub(r'^(Assignment|File|Folder|Quiz|URL|Forum)\s*', '', title_text, flags=re.IGNORECASE)
+                title_text = re.sub(r'(File|URL|Assignment|Quiz|Forum)$', '', title_text, flags=re.IGNORECASE).strip()
 
                 if not title_text:
                     continue
@@ -154,41 +113,36 @@ def generate_full_inventory():
                 elif mtype == "forum":
                     forums.append(item_obj)
 
-            # Skip courses that have 0 materials (empty containers)
+            # Skip empty courses if they have 0 items
             if not assignments and not quizzes and not files_chapters and not recordings_urls:
                 continue
 
-            # Build Telegram Message for this course
             msg = (
                 f"📚 <b>{course_title}</b>\n"
                 f"🔗 <a href='{course_url}'>رابط صفحة المساق</a>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
             )
 
-            # 1. Assignments
             if assignments:
                 msg += "📝 <b>الواجبات والتاسكات (Assignments):</b>\n"
                 for it in assignments:
                     msg += f"• <a href='{it['url']}'>{it['title']}</a>\n"
                 msg += "\n"
 
-            # 2. Quizzes
             if quizzes:
                 msg += "⏱️ <b>الكويزات والاختبارات (Quizzes):</b>\n"
                 for it in quizzes:
                     msg += f"• <a href='{it['url']}'>{it['title']}</a>\n"
                 msg += "\n"
 
-            # 3. Chapters & Files
             if files_chapters:
                 msg += f"📄 <b>المحاضرات والشباتر والملفات ({len(files_chapters)}):</b>\n"
-                for it in files_chapters[:12]:  # limit if too long
+                for it in files_chapters[:12]:
                     msg += f"• <a href='{it['url']}'>{it['title']}</a>\n"
                 if len(files_chapters) > 12:
                     msg += f"<i>...والمزيد في صفحة المساق ({len(files_chapters) - 12} ملف إضافي)</i>\n"
                 msg += "\n"
 
-            # 4. Recordings & Links
             if recordings_urls:
                 msg += f"🎥 <b>تسجيلات وروابط المحاضرات ({len(recordings_urls)}):</b>\n"
                 for it in recordings_urls[:6]:
@@ -199,8 +153,7 @@ def generate_full_inventory():
 
             print(f"[Report] Sending report for: {course_title}")
             send_telegram_message(bot_token, chat_id, msg)
-            import time
-            time.sleep(1.5)
+            time.sleep(1.2)
 
         except Exception as e:
             print(f"[Report Error] Course ID {cid}: {e}")

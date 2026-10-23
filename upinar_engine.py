@@ -175,42 +175,67 @@ def login_flow(session: requests.Session, student_id: str, password: str) -> boo
 
 def get_enrolled_courses(session: requests.Session) -> List[Dict[str, str]]:
     """
-    Extracts all enrolled course IDs from UPINAR dashboard.
+    Extracts all enrolled courses from UPINAR using Moodle's internal timeline service API
+    with fallback to HTML link discovery.
     """
-    print("[Courses] Scanning registered courses...")
-    found_cids = set()
+    print("[Courses] Scanning all enrolled courses via Moodle API...")
     courses = []
+    found_cids = set()
+
     try:
-        targets = [
-            "https://upinar.edu.ps/my/courses.php",
-            "https://upinar.edu.ps/my/"
-        ]
+        r_my = session.get("https://upinar.edu.ps/my/", timeout=40)
+        sess_m = re.search(r'"sesskey":"([^"]+)"', r_my.text)
+        sesskey = sess_m.group(1) if sess_m else ""
 
-        for url in targets:
-            r = session.get(url, timeout=60)
+        if sesskey:
+            service_url = f"https://upinar.edu.ps/lib/ajax/service.php?sesskey={sesskey}&info=core_course_get_enrolled_courses_by_timeline_classification"
+            payload = [{
+                "index": 0,
+                "methodname": "core_course_get_enrolled_courses_by_timeline_classification",
+                "args": {"offset": 0, "limit": 0, "classification": "all", "sort": "fullname"}
+            }]
+            r_svc = session.post(service_url, json=payload, timeout=30)
+            svc_data = r_svc.json()
+            if isinstance(svc_data, list) and len(svc_data) > 0 and not svc_data[0].get("error"):
+                api_courses = svc_data[0].get("data", {}).get("courses", [])
+                for c in api_courses:
+                    cid = str(c["id"])
+                    if cid == "1" or cid in found_cids:
+                        continue
+                    found_cids.add(cid)
+                    courses.append({
+                        "id": cid,
+                        "title": c.get("fullname", f"Course #{cid}").strip(),
+                        "url": f"https://upinar.edu.ps/course/view.php?id={cid}"
+                    })
+    except Exception as e:
+        print(f"[Courses API Notice] {e}")
+
+    # Fallback to HTML if API returned nothing
+    if not courses:
+        try:
+            r = session.get("https://upinar.edu.ps/my/", timeout=40)
             soup = BeautifulSoup(r.text, 'html.parser')
-
-            links = soup.find_all('a', href=re.compile(r'/course/view\.php\?id=\d+'))
-            for a in links:
-                href = a.get('href', '')
-                match = re.search(r'id=(\d+)', href)
-                if not match:
+            for a in soup.find_all('a', href=re.compile(r'/course/view\.php\?id=\d+')):
+                m = re.search(r'id=(\d+)', a['href'])
+                if not m:
                     continue
-                cid = match.group(1)
+                cid = m.group(1)
                 if cid == "1" or cid in found_cids:
                     continue
                 found_cids.add(cid)
                 courses.append({
                     "id": cid,
-                    "title": f"Course #{cid}", # Will be updated with official title on visit
+                    "title": f"Course #{cid}",
                     "url": f"https://upinar.edu.ps/course/view.php?id={cid}"
                 })
+        except:
+            pass
 
-        print(f"[Courses] Found {len(courses)} registered course IDs to check.")
-        return courses
-    except Exception as e:
-        print(f"[Courses Error] {e}")
-        return courses
+    print(f"[Courses] Successfully found {len(courses)} enrolled courses across your semester.")
+    for idx, c in enumerate(courses, 1):
+        print(f"   {idx}. {c['title']} (ID: {c['id']})")
+    return courses
 
 def scan_course_content(session: requests.Session, course: Dict[str, str]) -> List[Dict[str, str]]:
     """
@@ -235,7 +260,6 @@ def scan_course_content(session: requests.Session, course: Dict[str, str]) -> Li
         if breadcrumb:
             crumbs = [c.get_text(strip=True) for c in breadcrumb.find_all('li')]
             if len(crumbs) >= 2:
-                # The last item or second to last is usually the official course title
                 candidate = crumbs[-1]
                 if candidate and len(candidate) > len(official_title) and "تسجيل الدخول" not in candidate:
                     official_title = candidate
@@ -264,7 +288,6 @@ def scan_course_content(session: requests.Session, course: Dict[str, str]) -> Li
             seen_keys.add(unique_key)
 
             # Clean screen-reader hidden tags (<span class="accesshide">File</span>)
-            # which cause "SyllabusFile", "Chapter 1File", "ImplementationsURL"
             for hide in a.find_all(class_=re.compile(r'(accesshide|sr-only|badge)')):
                 hide.decompose()
 
@@ -350,10 +373,10 @@ def check_upinar_now(is_first_run: bool = False):
             f"✅ <b>تم تفعيل نظام متابعة اليوبينار بنجاح!</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🎓 <b>جامعة فلسطين - UPINAR</b>\n"
-            f"📚 <b>عدد المساقات:</b> {len(courses)}\n"
-            f"📦 <b>إجمالي المحتويات الحالية:</b> {len(all_scanned_keys)} ملف وواجب تم فهرستهم\n"
+            f"📚 <b>عدد المساقات المفهرسة:</b> {len(courses)} مساقاً مسجلاً\n"
+            f"📦 <b>إجمالي المحتويات الحالية:</b> {len(all_scanned_keys)} ملف وواجب تم حصرهم\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"🚀 <i>النظام الآن يراقب المنصة بدقة، وسيصلك إشعار فوري فور إضافة أي واجب أو محاضرة جديدة.</i>"
+            f"🚀 <i>النظام الآن يراقب جميع مساقاتك الـ {len(courses)} بدقة، وسيصلك إشعار فوري فور إضافة أي واجب أو محاضرة جديدة!</i>"
         )
         send_telegram_message(bot_token, chat_id, initial_msg)
         return
