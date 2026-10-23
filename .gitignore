@@ -1,0 +1,16 @@
+# Security & Secrets (NEVER COMMIT THESE)
+config.json
+session_cookies.json
+seen_items.json
+*.png
+.env
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS Files
+Thumbs.db
+Desktop.ini
+.DS_Store
