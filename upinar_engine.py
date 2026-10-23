@@ -175,10 +175,11 @@ def login_flow(session: requests.Session, student_id: str, password: str) -> boo
 
 def get_enrolled_courses(session: requests.Session) -> List[Dict[str, str]]:
     """
-    Extracts all enrolled courses from UPINAR.
+    Extracts all enrolled course IDs from UPINAR dashboard.
     """
     print("[Courses] Scanning registered courses...")
-    course_map = {}
+    found_cids = set()
+    courses = []
     try:
         targets = [
             "https://upinar.edu.ps/my/courses.php",
@@ -196,42 +197,55 @@ def get_enrolled_courses(session: requests.Session) -> List[Dict[str, str]]:
                 if not match:
                     continue
                 cid = match.group(1)
-                if cid == "1":  # Site home
+                if cid == "1" or cid in found_cids:
                     continue
+                found_cids.add(cid)
+                courses.append({
+                    "id": cid,
+                    "title": f"Course #{cid}", # Will be updated with official title on visit
+                    "url": f"https://upinar.edu.ps/course/view.php?id={cid}"
+                })
 
-                title = a.get_text(strip=True)
-                if not title:
-                    title = a.get('title') or a.get('aria-label') or ""
-                title = re.sub(r'\s+', ' ', title).strip()
-
-                if title and cid not in course_map and len(title) > 3 and not title.lower().startswith("chapter") and not title.lower().startswith("module"):
-                    course_map[cid] = {
-                        "id": cid,
-                        "title": title,
-                        "url": f"https://upinar.edu.ps/course/view.php?id={cid}"
-                    }
-
-        courses = list(course_map.values())
-        print(f"[Courses] Found {len(courses)} active courses.")
-        for idx, c in enumerate(courses, 1):
-            print(f"   {idx}. {c['title']} (ID: {c['id']})")
+        print(f"[Courses] Found {len(courses)} registered course IDs to check.")
         return courses
     except Exception as e:
         print(f"[Courses Error] {e}")
-        return list(course_map.values())
+        return courses
 
 def scan_course_content(session: requests.Session, course: Dict[str, str]) -> List[Dict[str, str]]:
     """
-    Scrapes all activities, resources, assignments, etc. from a course page.
+    Scrapes all activities, resources, assignments, etc. from a course page
+    and resolves the official course name.
     """
     items = []
     course_url = course["url"]
-    course_title = course["title"]
+    cid = course["id"]
 
     try:
         r = session.get(course_url, timeout=60)
         soup = BeautifulSoup(r.text, 'html.parser')
 
+        # 1. Resolve Official Course Title directly from the course page header or breadcrumb
+        official_title = ""
+        h1 = soup.find('h1')
+        if h1:
+            official_title = h1.get_text(strip=True)
+
+        breadcrumb = soup.find('nav', {'aria-label': re.compile(r'(breadcrumb|navigation)', re.I)})
+        if breadcrumb:
+            crumbs = [c.get_text(strip=True) for c in breadcrumb.find_all('li')]
+            if len(crumbs) >= 2:
+                # The last item or second to last is usually the official course title
+                candidate = crumbs[-1]
+                if candidate and len(candidate) > len(official_title) and "تسجيل الدخول" not in candidate:
+                    official_title = candidate
+
+        if official_title and "تسجيل الدخول" not in official_title:
+            course["title"] = official_title
+        else:
+            official_title = course["title"]
+
+        # 2. Extract Activities
         links = soup.find_all('a', href=re.compile(r'/mod/([a-zA-Z0-9_]+)/view\.php\?id=(\d+)'))
         seen_keys = set()
 
@@ -243,11 +257,16 @@ def scan_course_content(session: requests.Session, course: Dict[str, str]) -> Li
 
             mod_type = match.group(1).lower()
             mod_id = match.group(2)
-            unique_key = f"{course['id']}_{mod_type}_{mod_id}"
+            unique_key = f"{cid}_{mod_type}_{mod_id}"
 
             if unique_key in seen_keys:
                 continue
             seen_keys.add(unique_key)
+
+            # Clean screen-reader hidden tags (<span class="accesshide">File</span>)
+            # which cause "SyllabusFile", "Chapter 1File", "ImplementationsURL"
+            for hide in a.find_all(class_=re.compile(r'(accesshide|sr-only|badge)')):
+                hide.decompose()
 
             instance = a.find(class_=re.compile(r'(instancename|activityname)'))
             if instance:
@@ -255,7 +274,9 @@ def scan_course_content(session: requests.Session, course: Dict[str, str]) -> Li
             else:
                 title_text = a.get_text(strip=True)
 
+            # Clean any trailing or leading type names
             title_text = re.sub(r'^(Assignment|File|Folder|Quiz|URL|Forum)\s*', '', title_text, flags=re.IGNORECASE)
+            title_text = re.sub(r'(File|URL|Assignment|Quiz|Forum)$', '', title_text, flags=re.IGNORECASE)
             title_text = re.sub(r'\s+', ' ', title_text).strip()
 
             if not title_text:
@@ -263,7 +284,7 @@ def scan_course_content(session: requests.Session, course: Dict[str, str]) -> Li
 
             items.append({
                 "unique_key": unique_key,
-                "course_name": course_title,
+                "course_name": official_title,
                 "mod_type": mod_type,
                 "mod_id": mod_id,
                 "title": title_text,
@@ -271,7 +292,7 @@ def scan_course_content(session: requests.Session, course: Dict[str, str]) -> Li
             })
 
     except Exception as e:
-        print(f"[Scan Error] Course {course_title}: {e}")
+        print(f"[Scan Error] Course ID {cid}: {e}")
 
     return items
 
@@ -282,17 +303,9 @@ def check_upinar_now(is_first_run: bool = False):
     bot_token = config.get("telegram_bot_token")
     chat_id = config.get("telegram_chat_id")
 
-    if not password or password == "YOUR_PASSWORD_HERE":
-        print("[Notice] Please set your password in config.json.")
+    if not password or password == "YOUR_PORTAL_PASSWORD":
+        print("[Notice] Please set your credentials in config.json.")
         return
-
-    # Check if chat_id is mistakenly set to bot's id
-    if chat_id and chat_id.startswith("8907715291"):
-        print("=" * 60)
-        print("⚠️ [تنبيه تيليجرام] رقم telegram_chat_id الحالي هو رقم البوت نفسه!")
-        print("يرجى إرسال أي رسالة لبوت @userinfobot وأخذ رقم الـ Id الخاص بك")
-        print("ووضعه في config.json لتصلك الإشعارات بنجاح.")
-        print("=" * 60)
 
     session = create_robust_session()
 
@@ -323,6 +336,7 @@ def check_upinar_now(is_first_run: bool = False):
 
     for course in courses:
         items = scan_course_content(session, course)
+        print(f"   -> Course: {course['title']} ({len(items)} items)")
         for it in items:
             all_scanned_keys.add(it["unique_key"])
             if it["unique_key"] not in seen_items:
