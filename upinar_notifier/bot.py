@@ -2,8 +2,9 @@ import asyncio
 import html
 import os
 import time
+from typing import Dict
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.error import InvalidToken
 from telegram.request import HTTPXRequest
 from telegram.ext import (
@@ -24,22 +25,22 @@ from .settings import get_settings
 ASK_STUDENT_ID, ASK_PASSWORD = range(2)
 
 WELCOME = (
-    "مرحباً بك في بوت يوبينار UPINAR Notifier 🎓\n"
+    "مرحباً بك في بوت يوبينار جامعة فلسطين 🎓\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "هذا البوت مخصص لطلاب <b>جامعة فلسطين</b> لمتابعة مساقات الموديل (اليوبينار) تلقائياً، "
+    "هذا البوت مخصص لطلاب <b>جامعة فلسطين</b> لمتابعة مساقات الموديل (اليوبينار UPINAR) تلقائياً، "
     "وإرسال إشعارات فورية بكل واجب، كويز، محاضرة، إعلان، أو شبتر جديد.\n\n"
-    "الخطوة [1/2]:\n"
+    "📌 <b>الخطوة [1/2]:</b>\n"
     "من فضلك أرسل <b>رقمك الجامعي</b> للمتابعة:"
 )
 
 ASK_ID_AGAIN = (
-    "الرجاء إدخال رقمك الجامعي بشكل صحيح (أرقام فقط)."
+    "⚠️ <b>تنبيه:</b> الرجاء إدخال رقمك الجامعي بشكل صحيح (أرقام فقط بدون حروف أو رموز)."
 )
 
 ASK_PASSWORD_MSG = (
-    "الخطوة [2/2]:\n"
+    "📌 <b>الخطوة [2/2]:</b>\n"
     "الآن أرسل <b>كلمة مرور بوابة الطالب</b> (Portal Password):\n\n"
-    "🔒 <i>ملاحظة أمنية مشددة:</i>\n"
+    "🔒 <b>ملاحظة أمنية مشددة:</b>\n"
     "• سيتم حذف رسالتك تلقائياً فور استلامها لحماية خصوصيتك.\n"
     "• يتم تشفير كلمة المرور بقوة (AES-256) قبل حفظها في قاعدة البيانات.\n"
     "• لن يطّلع عليها أي شخص ولن يتم مشاركتها أبداً."
@@ -47,7 +48,7 @@ ASK_PASSWORD_MSG = (
 
 CHECKING = (
     "⏳ <b>جاري التحقق من بيانات الدخول...</b>\n"
-    "يتم الاتصال ببوابة الطالب ونظام الموديل (SSO). قد يستغرق ذلك نصف دقيقة، انتظر لحظة..."
+    "يتم الاتصال ببوابة الطالب ونظام الموديل (SSO). يستغرق ذلك بضع ثوانٍ، انتظر لحظة..."
 )
 
 LOGIN_FAILED = (
@@ -55,6 +56,7 @@ LOGIN_FAILED = (
     "الرقم الجامعي أو كلمة المرور غير صحيحة، أو أن خوادم الجامعة بطيئة حالياً.\n\n"
     "يرجى التأكد من بيانات الدخول وإرسال /start للمحاولة من جديد."
 )
+
 
 def format_interval(minutes: int) -> str:
     if minutes >= 60 and minutes % 60 == 0:
@@ -82,17 +84,46 @@ REGISTERED_HEADER = (
 HELP = (
     "📖 <b>دليل أوامر بوت يوبينار (UPINAR Notifier)</b>\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "/start — تسجيل أو تحديث بيانات الحساب والبدء\n"
-    "/check — فحص فوري للمساقات للبحث عن أي جديد الآن\n"
-    "/report — إرسال تقرير وجرد شامل لجميع مساقاتك والمحتوى الحالي\n"
-    "/courses — استعراض مساقاتك المسجلة\n"
-    "/status — عرض حالة المراقبة وآخر موعد فحص\n"
-    "/stop — إيقاف التنبيهات مؤقتاً\n"
-    "/cancel — إلغاء عملية التسجيل الحالية\n"
-    "/help — عرض هذه المساعدة\n\n"
-    "🔒 <b>الأمان والخصوصية:</b>\n"
-    "بيانات كل طالب معزولة تماماً، وتُحفظ كلمات المرور مشفرة بتقنية AES-256."
+    "🔹 /start — تسجيل أو تحديث بيانات الحساب والبدء\n"
+    "🔹 /check — فحص فوري للمساقات للبحث عن أي تكليف جديد الآن\n"
+    "🔹 /courses — عرض قائمة مساقاتك المسجلة وروابطها المباشرة\n"
+    "🔹 /report — إرسال تقرير وجرد شامل لجميع المساقات والمحتويات\n"
+    "🔹 /status — عرض حالة المراقبة وموعد الفحص القادم\n"
+    "🔹 /stop — إيقاف التنبيهات الدورية مؤقتاً\n"
+    "🔹 /cancel — إلغاء خطوة التسجيل الحالية\n"
+    "🔹 /help — عرض هذه المساعدة ودليل الأوامر\n\n"
+    "⏱️ <b>المراقبة الدورية:</b> يقوم البوت بالفحص التلقائي كل <b>12 ساعة</b> وإرسال إشعار فوري عند أي جديد.\n"
+    "🔒 <b>الأمان والخصوصية:</b> بيانات كل طالب معزولة تماماً، وتُحفظ كلمات المرور مشفرة بتقنية AES-256."
 )
+
+# Rate Limiting & Concurrency Tracker per Student
+USER_ACTIVITY: Dict[str, Dict] = {}
+CHECK_COOLDOWN_SECONDS = 300   # 5 minutes cooldown between manual /check
+REPORT_COOLDOWN_SECONDS = 600  # 10 minutes cooldown between full /report
+
+
+def is_user_busy(chat_id: str) -> bool:
+    return USER_ACTIVITY.get(chat_id, {}).get("is_scanning", False)
+
+
+def set_user_busy(chat_id: str, busy: bool) -> None:
+    if chat_id not in USER_ACTIVITY:
+        USER_ACTIVITY[chat_id] = {}
+    USER_ACTIVITY[chat_id]["is_scanning"] = busy
+
+
+def get_cooldown_remaining(chat_id: str, action: str, cooldown_seconds: int) -> int:
+    last_time = USER_ACTIVITY.get(chat_id, {}).get(action, 0)
+    elapsed = time.time() - last_time
+    if elapsed < cooldown_seconds:
+        return int(cooldown_seconds - elapsed)
+    return 0
+
+
+def record_user_action(chat_id: str, action: str) -> None:
+    if chat_id not in USER_ACTIVITY:
+        USER_ACTIVITY[chat_id] = {}
+    USER_ACTIVITY[chat_id][action] = time.time()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -108,7 +139,7 @@ async def receive_student_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     student_id = update.message.text.strip()
     if not student_id or not student_id.isdigit():
-        await update.message.reply_text(ASK_ID_AGAIN)
+        await update.message.reply_text(ASK_ID_AGAIN, parse_mode="HTML")
         return ASK_STUDENT_ID
 
     if len(student_id) < 5 or len(student_id) > 32:
@@ -211,6 +242,8 @@ def _validate_login(account: StudentAccount, db) -> tuple[bool, str]:
 
 
 async def _scan_in_background(account: StudentAccount, force_inventory: bool = False) -> None:
+    chat_id = account.telegram_chat_id
+    set_user_busy(chat_id, True)
     try:
         await asyncio.to_thread(
             get_scan_service().scan_account,
@@ -218,15 +251,18 @@ async def _scan_in_background(account: StudentAccount, force_inventory: bool = F
             force_inventory=force_inventory,
         )
         get_database().accounts.mark_scan(account.student_id)
+        record_user_action(chat_id, "last_report" if force_inventory else "last_check")
     except Exception as exc:
         print(f"[Bot] Scan failed for {account.student_id}: {exc}")
         get_database().accounts.mark_scan(account.student_id, error=str(exc))
+    finally:
+        set_user_busy(chat_id, False)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     if update.message:
-        await update.message.reply_text("تم إلغاء العملية. أرسل /start للبدء من جديد.")
+        await update.message.reply_text("تم إلغاء عملية التسجيل. أرسل /start في أي وقت للبدء من جديد.")
     return ConversationHandler.END
 
 
@@ -237,7 +273,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     settings = get_settings()
     row = db.accounts.get_row_by_chat_id(str(update.effective_chat.id))
     if not row:
-        await update.message.reply_text("لم يتم تسجيل حساب بعد. أرسل /start للبدء.")
+        await update.message.reply_text(
+            "⚠️ <b>لم يتم تسجيل حساب بعد!</b>\n"
+            "أرسل /start لتسجيل بياناتك وبدء متابعة مساقاتك.",
+            parse_mode="HTML"
+        )
         return
 
     student_id = row["student_id"]
@@ -249,12 +289,14 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "📊 <b>حالة الحساب والمراقبة</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"🎓 <b>الرقم الجامعي:</b> <code>{html.escape(student_id)}</code>\n"
-        f"🔔 <b>المراقبة:</b> {active_str}\n"
-        f"📦 <b>العناصر المأرشفة:</b> {tracked_count} عنصر\n"
+        f"🔔 <b>المراقبة التلقائية:</b> {active_str}\n"
+        f"📦 <b>إجمالي العناصر المؤرشفة:</b> {tracked_count} عنصر\n"
         f"⏱️ <b>آخر فحص:</b> {last_scan}\n"
-        f"🔄 <b>دورة الفحص:</b> {format_interval(settings.check_interval_minutes)}\n\n"
-        "💡 للفحص الفوري الآن: /check\n"
-        "💡 لعرض تقرير المحتوى: /report"
+        f"🔄 <b>دورة المراقبة الدورية:</b> {format_interval(settings.check_interval_minutes)}\n\n"
+        "💡 <i>أوامر سريعة:</i>\n"
+        "• /check — فحص يدوي للمساقات الآن\n"
+        "• /courses — قائمة المواد المسجلة\n"
+        "• /report — تقرير الجرد الكامل"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -263,41 +305,165 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.message or not update.effective_chat:
         return
     db = get_database()
-    account = db.accounts.load_by_chat_id(str(update.effective_chat.id))
+    chat_id = str(update.effective_chat.id)
+    account = db.accounts.load_by_chat_id(chat_id)
     if not account:
-        await update.message.reply_text("لم تقم بربط حسابك بعد. أرسل /start للبدء.")
+        await update.message.reply_text(
+            "⚠️ <b>لم تقم بربط حسابك بعد!</b>\n"
+            "أرسل /start لتسجيل حسابك وبدء متابعة مساقاتك.",
+            parse_mode="HTML"
+        )
         return
 
-    status_msg = await update.message.reply_text("🔍 جاري فحص مساقاتك على اليوبينار الآن... انتظر لحظات.")
-    scanner = get_scan_service()
-    result = await asyncio.to_thread(scanner.scan_account, account, False)
+    if is_user_busy(chat_id):
+        await update.message.reply_text(
+            "⏳ <b>جاري فحص مساقاتك بالفعل الآن!</b>\n"
+            "يرجى الانتظار لحظات حتى تنتهي عملية الفحص الجارية لتجنب الضغط على خوادم الجامعة.",
+            parse_mode="HTML"
+        )
+        return
 
-    if result is None:
-        await status_msg.edit_text(
-            "⚠️ تعذر الاتصال باليوبينار حالياً. تأكد من أن كلمة مرورك لم تتغير في البوابة، أو أعد المحاولة لاحقاً."
+    remaining = get_cooldown_remaining(chat_id, "last_check", CHECK_COOLDOWN_SECONDS)
+    if remaining > 0:
+        minutes = (remaining // 60) + 1
+        await update.message.reply_text(
+            f"⏳ <b>مهلاً! لقد قمت بالفحص قبل قليل.</b>\n"
+            f"لتجنب حظر حسابك والضغط على سيرفرات الجامعة، يمكنك الفحص اليدوي مجدداً بعد <b>{minutes} دقيقة</b>.\n\n"
+            "💡 <i>تذكير: البوت يقوم بفحص مساقاتك تلقائياً كل 12 ساعة وسينبهك فور نزول أي واجب أو ملف جديد دون تدخل منك.</i>",
+            parse_mode="HTML"
         )
-    elif result.new_items:
+        return
+
+    status_msg = await update.message.reply_text(
+        "🔍 <b>جاري فحص مساقاتك على اليوبينار الآن...</b>\nانتظر بضع ثوانٍ.",
+        parse_mode="HTML"
+    )
+    set_user_busy(chat_id, True)
+    try:
+        scanner = get_scan_service()
+        result = await asyncio.to_thread(scanner.scan_account, account, False)
+        record_user_action(chat_id, "last_check")
+        get_database().accounts.mark_scan(account.student_id)
+
+        if result is None:
+            await status_msg.edit_text(
+                "⚠️ <b>تعذر الاتصال باليوبينار حالياً.</b>\n"
+                "تأكد من أن كلمة مرورك لم تتغير في بوابة الطالب، أو أعد المحاولة لاحقاً.",
+                parse_mode="HTML"
+            )
+        elif result.new_items:
+            await status_msg.edit_text(
+                f"🎉 <b>تم الفحص بنجاح:</b>\n"
+                f"تم العثور على <b>{len(result.new_items)}</b> عنصر جديد وتم إرسال الإشعارات إليك بالأعلى!",
+                parse_mode="HTML",
+            )
+        else:
+            await status_msg.edit_text(
+                f"✅ <b>فحص مكتمل:</b>\n"
+                f"تم فحص <b>{len(result.courses)} مساقات</b> مسجلة، وجميع محتوياتك محدثة بالكامل ولا يوجد أي واجب أو كويز أو ملف جديد حالياً.",
+                parse_mode="HTML",
+            )
+    except Exception as exc:
+        print(f"[Check Command Error] {exc}")
+        await status_msg.edit_text(f"⚠️ حدث خطأ أثناء الفحص: {exc}")
+    finally:
+        set_user_busy(chat_id, False)
+
+
+async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_chat:
+        return
+    db = get_database()
+    chat_id = str(update.effective_chat.id)
+    account = db.accounts.load_by_chat_id(chat_id)
+    if not account:
+        await update.message.reply_text(
+            "⚠️ <b>لم تقم بتسجيل حسابك بعد!</b>\n"
+            "أرسل /start لتسجيل حسابك وبدء متابعة مساقاتك.",
+            parse_mode="HTML"
+        )
+        return
+
+    status_msg = await update.message.reply_text("📚 <b>جاري جلب قائمة مساقاتك المسجلة...</b>", parse_mode="HTML")
+    try:
+        auth = MoodleAuth(session_store=db.sessions)
+        session = await asyncio.to_thread(auth.get_session, account)
+        if not session:
+            await status_msg.edit_text(
+                "⚠️ <b>تعذر الاتصال باليوبينار حالياً.</b>\n"
+                "يرجى التأكد من استقرار الإنترنت والمحاولة لاحقاً.",
+                parse_mode="HTML"
+            )
+            return
+
+        from .moodle_client import MoodleScraper
+        scraper = MoodleScraper(session)
+        courses = await asyncio.to_thread(scraper.get_enrolled_courses)
+        if not courses:
+            await status_msg.edit_text(
+                "لم يتم العثور على أي مساقات مسجلة لهذا الفصل الدراسي.",
+                parse_mode="HTML"
+            )
+            return
+
+        lines = [
+            "📚 <b>مساقاتك المسجلة في اليوبينار:</b>",
+            "━━━━━━━━━━━━━━━━━━",
+        ]
+        for idx, c in enumerate(courses, 1):
+            c_name = html.escape(c.name or f"مساق #{c.id}")
+            c_url = html.escape(c.url or f"https://upinar.edu.ps/course/view.php?id={c.id}")
+            lines.append(f"<b>{idx}.</b> <a href=\"{c_url}\">{c_name}</a>")
+
+        lines.append("\n💡 <i>لعرض كافة الواجبات والمحتويات بالتفصيل لكل مساق، أرسل: /report</i>")
         await status_msg.edit_text(
-            f"🎉 تم الفحص: تم العثور على <b>{len(result.new_items)}</b> عنصر جديد وتم إرسال التنبيهات بالأعلى!",
+            "\n".join(lines),
             parse_mode="HTML",
+            disable_web_page_preview=True
         )
-    else:
-        await status_msg.edit_text(
-            f"✅ فحص مكتمل: تم فحص <b>{len(result.courses)} مساقات</b>، وجميع محتوياتك محدثة ولا يوجد أي واجب أو ملف جديد.",
-            parse_mode="HTML",
-        )
+    except Exception as exc:
+        print(f"[Courses Command Error] {exc}")
+        await status_msg.edit_text(f"⚠️ حدث خطأ أثناء جلب المساقات: {exc}")
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_chat:
         return
     db = get_database()
-    account = db.accounts.load_by_chat_id(str(update.effective_chat.id))
+    chat_id = str(update.effective_chat.id)
+    account = db.accounts.load_by_chat_id(chat_id)
     if not account:
-        await update.message.reply_text("لم تقم بربط حسابك بعد. أرسل /start للبدء.")
+        await update.message.reply_text(
+            "⚠️ <b>لم تقم بربط حسابك بعد!</b>\n"
+            "أرسل /start لتسجيل حسابك وبدء متابعة مساقاتك.",
+            parse_mode="HTML"
+        )
         return
 
-    await update.message.reply_text("📊 جاري إعداد تقرير شامل لجميع مساقاتك والمحتوى المتوفر الآن... انتظر قليلاً.")
+    if is_user_busy(chat_id):
+        await update.message.reply_text(
+            "⏳ <b>جاري إعداد تقريرك بالفعل الآن!</b>\n"
+            "يرجى الانتظار لحظات حتى تكتمل العملية الجارية.",
+            parse_mode="HTML"
+        )
+        return
+
+    remaining = get_cooldown_remaining(chat_id, "last_report", REPORT_COOLDOWN_SECONDS)
+    if remaining > 0:
+        minutes = (remaining // 60) + 1
+        await update.message.reply_text(
+            f"⏳ <b>تم إرسال تقرير الجرد مؤخراً!</b>\n"
+            f"لتفادي إرهاق خوادم الجامعة، يمكنك طلب تقرير جديد بعد <b>{minutes} دقيقة</b>.\n\n"
+            "💡 <i>لعرض أسماء المواد المسجلة فقط بشكل سريع وبدون انتظار، أرسل: /courses</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    await update.message.reply_text(
+        "📊 <b>جاري إعداد تقرير شامل لجميع مساقاتك والمحتوى المتوفر الآن...</b>\n"
+        "قد يستغرق ذلك نصف دقيقة، ستصلك البطاقات تباعاً بالأسفل 🚀",
+        parse_mode="HTML"
+    )
     asyncio.create_task(_scan_in_background(account, force_inventory=True))
 
 
@@ -307,11 +473,13 @@ async def stop_monitoring(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     db = get_database()
     row = db.accounts.get_row_by_chat_id(str(update.effective_chat.id))
     if not row:
-        await update.message.reply_text("لا يوجد حساب مرتبط بهذه المحادثة. أرسل /start.")
+        await update.message.reply_text("لا يوجد حساب مرتبط بهذه المحادثة. أرسل /start للبدء.")
         return
     db.accounts.set_active(str(update.effective_chat.id), False)
     await update.message.reply_text(
-        "⏸️ تم إيقاف التنبيهات الدورية لحسابك.\nيمكنك إعادة تفعيلها في أي وقت بإرسال /start."
+        "⏸️ <b>تم إيقاف التنبيهات الدورية لحسابك بنجاح.</b>\n"
+        "لن تصلك أي إشعارات تلقائية حتى تقوم بإعادة تفعيلها بإرسال /start في أي وقت تشاء.",
+        parse_mode="HTML"
     )
 
 
@@ -320,10 +488,67 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(HELP, parse_mode="HTML")
 
 
+async def handle_media_in_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        await update.message.reply_text(
+            "⚠️ <b>يرجى إرسال نص فقط!</b>\n"
+            "هذا البوت لا يستقبل الصور أو الوسائط أو الملفات. الرجاء كتابة رقمك الجامعي أو كلمة المرور كنص عادي.",
+            parse_mode="HTML"
+        )
+
+
+async def handle_unsupported_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    await update.message.reply_text(
+        "🚫 <b>عذراً، استقبال الوسائط غير مدعوم!</b>\n"
+        "تم حذف الرسالة تلقائياً للحفاظ على نظافة وأمان المحادثة. هذا البوت مخصص حصرياً لمتابعة مساقات ومنصة اليوبينار الجامعية، ولا يدعم استقبال الصور أو الفيديوهات أو الملفات.\n\n"
+        "💡 <i>أرسل /help للاطلاع على قائمة الأوامر المتاحة.</i>",
+        parse_mode="HTML"
+    )
+
+
+async def unknown_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    await update.message.reply_text(
+        "⚠️ <b>عذراً، هذا الأمر غير معروف!</b>\n"
+        "الأمر الذي أرسلته غير مسجل في النظام.\n\n"
+        "📖 أرسل /help لعرض قائمة الأوامر المعتمدة، أو /start للبدء.",
+        parse_mode="HTML"
+    )
+
+
+async def unknown_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+    await update.message.reply_text(
+        "مرحباً بك في بوت يوبينار جامعة فلسطين! 🎓\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "للتفاعل مع البوت، يرجى استخدام أحد الأوامر المعتمدة التالية:\n\n"
+        "🔹 /start — تسجيل أو تحديث بيانات الحساب والبدء\n"
+        "🔹 /check — فحص مساقاتك الآن للبحث عن أي جديد\n"
+        "🔹 /courses — عرض قائمة مساقاتك المسجلة وروابطها\n"
+        "🔹 /report — جرد كامل وشامل لجميع الواجبات والمحتويات\n"
+        "🔹 /status — حالة المراقبة وموعد الفحص القادم\n"
+        "🔹 /stop — إيقاف التنبيهات الدورية مؤقتاً\n"
+        "🔹 /help — دليل استخدام البوت والمساعدة",
+        parse_mode="HTML"
+    )
+
+
 async def monitor_loop(application: Application) -> None:
     settings = get_settings()
     interval_seconds = settings.check_interval_minutes * 60
-    print(f"[Monitor] Background checker configured: every {settings.check_interval_minutes} minutes.")
+    print(f"[Monitor] Background checker configured: every {settings.check_interval_minutes} minutes ({format_interval(settings.check_interval_minutes)}).")
     await asyncio.sleep(10)
     while True:
         started = time.time()
@@ -340,6 +565,19 @@ async def monitor_loop(application: Application) -> None:
 async def on_startup(application: Application) -> None:
     get_database()
     application.bot_data["monitor_task"] = asyncio.create_task(monitor_loop(application))
+    try:
+        commands = [
+            BotCommand("start", "تسجيل أو تحديث الحساب والبدء"),
+            BotCommand("check", "فحص مساقاتك الآن للبحث عن أي جديد"),
+            BotCommand("courses", "عرض قائمة مساقاتك المسجلة"),
+            BotCommand("report", "جرد شامل لجميع المحتويات والواجبات"),
+            BotCommand("status", "حالة المراقبة وموعد الفحص القادم"),
+            BotCommand("stop", "إيقاف التنبيهات الدورية مؤقتاً"),
+            BotCommand("help", "دليل استخدام البوت والمساعدة"),
+        ]
+        await application.bot.set_my_commands(commands)
+    except Exception as exc:
+        print(f"[Bot Warning] Failed to set bot commands menu: {exc}")
     print("[Bot] Telegram bot service started successfully. Listening for student commands...")
 
 
@@ -364,8 +602,14 @@ def build_application() -> Application:
     conversation = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ASK_STUDENT_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_student_id)],
-            ASK_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password)],
+            ASK_STUDENT_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_student_id),
+                MessageHandler(~filters.TEXT & ~filters.COMMAND, handle_media_in_conv),
+            ],
+            ASK_PASSWORD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password),
+                MessageHandler(~filters.TEXT & ~filters.COMMAND, handle_media_in_conv),
+            ],
         },
         fallbacks=[
             CommandHandler("start", start),
@@ -379,8 +623,27 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("check", check_command))
     application.add_handler(CommandHandler("report", report_command))
-    application.add_handler(CommandHandler("courses", report_command))
+    application.add_handler(CommandHandler("courses", courses_command))
     application.add_handler(CommandHandler("stop", stop_monitoring))
+
+    # Reject unsupported media (photos, videos, audio, documents, stickers, animations)
+    unsupported_media = (
+        filters.PHOTO
+        | filters.VIDEO
+        | filters.AUDIO
+        | filters.VOICE
+        | filters.Document.ALL
+        | filters.Sticker.ALL
+        | filters.ANIMATION
+    )
+    application.add_handler(MessageHandler(unsupported_media, handle_unsupported_media))
+
+    # Reject unknown slash commands
+    application.add_handler(MessageHandler(filters.COMMAND, unknown_command_handler))
+
+    # Handle arbitrary non-command text
+    application.add_handler(MessageHandler(filters.TEXT, unknown_text_handler))
+
     return application
 
 
@@ -430,7 +693,7 @@ def run_bot() -> None:
     settings = get_settings()
     print("=" * 60)
     print("      UPINAR Notifier - Multi-Student University Bot")
-    print(f"      Monitoring interval: every {settings.check_interval_minutes} minutes")
+    print(f"      Monitoring interval: every {settings.check_interval_minutes} minutes ({format_interval(settings.check_interval_minutes)})")
     print("=" * 60)
 
     # Pre-flight check to verify Telegram token before initializing the polling loop
