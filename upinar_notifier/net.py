@@ -1,12 +1,8 @@
-import socket
 import sys
 
 import requests
-import urllib3.util.connection as urllib_conn
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
-urllib_conn.allowed_gai_family = lambda: socket.AF_INET
 
 HEADERS = {
     "User-Agent": (

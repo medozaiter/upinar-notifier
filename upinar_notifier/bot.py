@@ -156,9 +156,14 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
     db = get_database()
-    ok = await asyncio.to_thread(_validate_login, account, db)
+    ok, error_detail = await asyncio.to_thread(_validate_login, account, db)
     if not ok:
-        await context.bot.send_message(chat_id=chat.id, text=LOGIN_FAILED, parse_mode="HTML")
+        fail_msg = (
+            "❌ <b>تعذر تسجيل الدخول!</b>\n"
+            f"⚠️ <b>السبب:</b> {html.escape(error_detail or 'الرقم الجامعي أو كلمة المرور غير صحيحة.')}\n\n"
+            "يرجى التأكد من بيانات الدخول وإرسال /start للمحاولة من جديد."
+        )
+        await context.bot.send_message(chat_id=chat.id, text=fail_msg, parse_mode="HTML")
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -184,9 +189,10 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return ConversationHandler.END
 
 
-def _validate_login(account: StudentAccount, db) -> bool:
+def _validate_login(account: StudentAccount, db) -> tuple[bool, str]:
     auth = MoodleAuth(session_store=db.sessions)
-    return bool(auth.login_with_account(account))
+    ok = auth.login_with_account(account)
+    return ok, auth.last_error
 
 
 async def _scan_in_background(account: StudentAccount, force_inventory: bool = False) -> None:

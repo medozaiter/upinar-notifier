@@ -1,7 +1,7 @@
 import json
 import re
 import urllib.parse
-from typing import Optional
+from typing import Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
@@ -19,10 +19,13 @@ OAUTH_FALLBACK = "https://upinar.edu.ps/auth/oauth2/login.php?id=1&wantsurl=http
 class MoodleAuth:
     def __init__(self, session_store: Optional[SessionStore] = None):
         self.session_store = session_store or FileSessionStore()
+        self.last_error: str = ""
 
     def login_with_account(self, account: StudentAccount) -> bool:
         session = create_robust_session()
-        return self.login(session, account)
+        ok, error_msg = self.login_with_feedback(session, account)
+        self.last_error = error_msg
+        return ok
 
     def get_session(self, account: StudentAccount) -> Optional[requests.Session]:
         session = create_robust_session()
@@ -35,9 +38,10 @@ class MoodleAuth:
                 return session
 
         print(f"[Auth] Performing fresh login for {account.student_id}...")
-        if self.login(session, account):
+        ok, _ = self.login_with_feedback(session, account)
+        if ok:
             return session
-        print(f"[Error] Login flow failed for {account.student_id}.")
+        print(f"[Error] Login flow failed for {account.student_id}: {self.last_error}")
         return None
 
     def is_logged_in(self, session: requests.Session) -> bool:
@@ -51,44 +55,71 @@ class MoodleAuth:
             return False
 
     def login(self, session: requests.Session, account: StudentAccount) -> bool:
+        ok, _ = self.login_with_feedback(session, account)
+        return ok
+
+    def login_with_feedback(self, session: requests.Session, account: StudentAccount) -> Tuple[bool, str]:
         student_id = str(account.student_id).strip()
         password = str(account.password).strip()
 
         if not student_id or not password:
-            return False
+            return False, "الرقم الجامعي أو كلمة المرور فارغة."
 
         if len(student_id) > 32 or len(password) > 128:
-            print("[Security] Invalid credentials length.")
-            return False
+            return False, "طول الرقم الجامعي أو كلمة المرور غير صالح."
 
         # Attempt Method 1: Student Portal SSO (Inertia.js -> UPINAR OAuth)
-        print("[Auth 1/2] Attempting Student Portal SSO (students.up.edu.ps)...")
-        if self._login_via_portal_sso(session, student_id, password):
+        print(f"[Auth 1/2] Attempting Student Portal SSO for {student_id}...")
+        ok_portal, portal_err = self._login_via_portal_sso(session, student_id, password)
+        if ok_portal:
             self.session_store.save(
                 account.student_id,
                 requests.utils.dict_from_cookiejar(session.cookies),
             )
-            return True
+            return True, ""
+
+        print(f"[Auth 1/2 Result] Portal SSO failed: {portal_err}")
 
         # Attempt Method 2: Direct UPINAR Moodle Login
-        print("[Auth 2/2] Attempting direct UPINAR Moodle login...")
-        if self._login_via_direct_moodle(session, student_id, password):
+        print(f"[Auth 2/2] Attempting direct UPINAR Moodle login for {student_id}...")
+        ok_moodle, moodle_err = self._login_via_direct_moodle(session, student_id, password)
+        if ok_moodle:
             self.session_store.save(
                 account.student_id,
                 requests.utils.dict_from_cookiejar(session.cookies),
             )
-            return True
+            return True, ""
 
-        return False
+        print(f"[Auth 2/2 Result] Direct Moodle login failed: {moodle_err}")
 
-    def _login_via_portal_sso(self, session: requests.Session, student_id: str, password: str) -> bool:
+        final_err = portal_err or moodle_err or "الرقم الجامعي أو كلمة المرور غير صحيحة."
+        return False, final_err
+
+    def _login_via_portal_sso(self, session: requests.Session, student_id: str, password: str) -> Tuple[bool, str]:
         try:
-            r_get = session.get(PORTAL_LOGIN, timeout=30)
-            if r_get.status_code != 200:
-                print(f"[Portal] GET login failed: HTTP {r_get.status_code}")
-                return False
+            # 1. Start from UPINAR login page to initialize OAuth session
+            print("[Portal SSO] Fetching Upinar login to acquire OAuth session parameters...")
+            r_moodle = session.get(UPINAR_LOGIN, timeout=40)
+            soup_m = BeautifulSoup(r_moodle.text, "html.parser")
+            oauth_link = None
+            for a in soup_m.find_all("a", href=True):
+                if "auth/oauth2" in a["href"]:
+                    oauth_link = a["href"]
+                    break
 
-            # Extract Inertia version reliably from data-page attribute
+            if not oauth_link:
+                oauth_link = OAUTH_FALLBACK
+
+            # 2. Call OAuth link to trigger redirect to portal authorize
+            r_oauth = session.get(oauth_link, allow_redirects=False, timeout=40)
+            authorize_url = r_oauth.headers.get("Location") or PORTAL_LOGIN
+            print(f"[Portal SSO] Authorize URL: {authorize_url}")
+
+            # 3. Visit the authorize URL which redirects to /login and sets intended URL
+            r_get = session.get(authorize_url, allow_redirects=True, timeout=40)
+            print(f"[Portal SSO] Landed at: {r_get.url} (HTTP {r_get.status_code})")
+
+            # Extract Inertia version reliably
             inertia_version = ""
             soup = BeautifulSoup(r_get.text, "html.parser")
             app_elem = soup.find(attrs={"data-page": True})
@@ -112,7 +143,7 @@ class MoodleAuth:
                 "X-Inertia-Version": inertia_version,
                 "X-XSRF-TOKEN": xsrf_token,
                 "Content-Type": "application/json",
-                "Referer": PORTAL_LOGIN,
+                "Referer": r_get.url,
                 "Origin": "https://students.up.edu.ps",
                 "Accept": "text/html, application/xhtml+xml",
             }
@@ -122,64 +153,62 @@ class MoodleAuth:
                 "remember": "on",
             }
 
+            print("[Portal SSO] Submitting credentials to students.up.edu.ps/login...")
             r_post = session.post(
                 PORTAL_LOGIN,
                 json=payload,
                 headers=post_headers,
-                timeout=30,
+                timeout=45,
                 allow_redirects=False,
             )
+            print(f"[Portal SSO] POST status: {r_post.status_code}")
 
-            # Check rejection based on redirect location or response
             if r_post.status_code == 302:
-                redirect_url = r_post.headers.get("location", "").lower()
+                redirect_url = r_post.headers.get("location", "")
+                print(f"[Portal SSO] Redirect Location: {redirect_url}")
+
+                # If redirected back to /login, login was rejected by portal
                 if redirect_url.rstrip("/").endswith("/login"):
-                    print("[Portal] Credentials rejected (redirected back to login).")
-                    return False
-            elif r_post.status_code not in (200, 302):
-                print(f"[Portal] POST returned unexpected HTTP {r_post.status_code}")
-                return False
+                    # Inspect rejection reason from login page
+                    r_err_page = session.get(redirect_url, timeout=30)
+                    reason = _extract_inertia_error(r_err_page.text)
+                    print(f"[Portal SSO Rejection Reason]: {reason}")
+                    return False, reason or "بيانات الاعتماد غير متطابقة مع سجلات بوابة الطالب."
 
-            if _portal_login_rejected(r_post):
-                print("[Portal] Login rejected by portal validation.")
-                return False
+                # If redirected to authorize URL or dashboard, follow the redirect chain
+                r_follow = session.get(redirect_url, allow_redirects=True, timeout=60)
+                print(f"[Portal SSO] Final chain landing URL: {r_follow.url}")
 
-            # Now synchronize with UPINAR via SSO OAuth
-            r_moodle_login = session.get(UPINAR_LOGIN, timeout=40)
-            soup_m = BeautifulSoup(r_moodle_login.text, "html.parser")
+                # Verify if session is now logged in to UPINAR
+                if self.is_logged_in(session):
+                    print("[SUCCESS] Fully logged into UPINAR via Portal SSO chain!")
+                    return True, ""
 
-            oauth_link = None
-            for anchor in soup_m.find_all("a", href=True):
-                if "auth/oauth2" in anchor["href"]:
-                    oauth_link = anchor["href"]
-                    break
-            if not oauth_link:
-                match = re.search(
-                    r"https?://upinar\.edu\.ps/auth/oauth2/login\.php\?[^\"']+",
-                    r_moodle_login.text,
-                )
-                if match:
-                    oauth_link = match.group(0)
-            if not oauth_link:
-                oauth_link = OAUTH_FALLBACK
+                # If landing is still on students portal, visit Upinar OAuth one more time now that we have cookies
+                r_sso_final = session.get(oauth_link, allow_redirects=True, timeout=60)
+                if self.is_logged_in(session):
+                    print("[SUCCESS] Fully logged into UPINAR via final OAuth step!")
+                    return True, ""
 
-            r_sso = session.get(oauth_link, timeout=45, allow_redirects=True)
-            if self.is_logged_in(session) or "login" not in r_sso.url.lower():
-                print("[SUCCESS] Fully logged into UPINAR via Portal SSO!")
-                return True
+                return False, f"تم الدخول للبوابة ولكن تعذر الانتقال لليوبينار (الرابط: {r_sso_final.url})"
 
-            print(f"[Portal SSO Notice] SSO redirect finished at {r_sso.url}")
-            return False
+            elif r_post.status_code == 200:
+                # Some Inertia versions return 200 with props
+                reason = _extract_inertia_error(r_post.text)
+                if reason:
+                    return False, reason
+
+            return False, f"استجابة غير متوقعة من بوابة الطالب (HTTP {r_post.status_code})"
+
         except Exception as exc:
             print(f"[Portal SSO Exception]: {exc}")
-            return False
+            return False, f"انتهت مهلة الاتصال ببوابة الطالب: {exc}"
 
-    def _login_via_direct_moodle(self, session: requests.Session, student_id: str, password: str) -> bool:
+    def _login_via_direct_moodle(self, session: requests.Session, student_id: str, password: str) -> Tuple[bool, str]:
         try:
-            r_get = session.get(UPINAR_LOGIN, timeout=30)
+            r_get = session.get(UPINAR_LOGIN, timeout=40)
             if r_get.status_code != 200:
-                print(f"[Moodle] GET login page returned HTTP {r_get.status_code}")
-                return False
+                return False, f"تعذر فتح صفحة الموديل (HTTP {r_get.status_code})"
 
             soup = BeautifulSoup(r_get.text, "html.parser")
             token_input = soup.find("input", {"name": "logintoken"})
@@ -191,7 +220,6 @@ class MoodleAuth:
                 "username": student_id,
                 "password": password,
             }
-
             headers = {
                 "Origin": "https://upinar.edu.ps",
                 "Referer": UPINAR_LOGIN,
@@ -207,25 +235,27 @@ class MoodleAuth:
 
             if self.is_logged_in(session):
                 print("[SUCCESS] Fully logged into UPINAR via direct login form!")
-                return True
+                return True, ""
 
-            print(f"[Moodle Notice] Direct login completed. Logged in status: {self.is_logged_in(session)}")
-            return False
+            soup_post = BeautifulSoup(r_post.text, "html.parser")
+            err_el = soup_post.find(class_="alert") or soup_post.find(id="loginerrormessage")
+            moodle_err = err_el.get_text(strip=True) if err_el else "بيانات الدخول المباشر للموديل غير صحيحة."
+            return False, moodle_err
+
         except Exception as exc:
             print(f"[Moodle Direct Login Exception]: {exc}")
-            return False
+            return False, f"خطأ في الاتصال بالموديل: {exc}"
 
 
-def _portal_login_rejected(response: requests.Response) -> bool:
+def _extract_inertia_error(html_text: str) -> str:
     try:
-        payload = response.json()
+        soup = BeautifulSoup(html_text, "html.parser")
+        app_elem = soup.find(attrs={"data-page": True})
+        if app_elem and app_elem.get("data-page"):
+            data = json.loads(app_elem["data-page"])
+            errors = data.get("props", {}).get("errors", {})
+            if isinstance(errors, dict) and errors:
+                return " - ".join(str(v) for v in errors.values())
     except Exception:
-        return False
-    if not isinstance(payload, dict):
-        return False
-    if payload.get("errors"):
-        return True
-    props = payload.get("props")
-    if isinstance(props, dict) and props.get("errors"):
-        return True
-    return False
+        pass
+    return ""
