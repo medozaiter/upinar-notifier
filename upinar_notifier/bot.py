@@ -1,5 +1,6 @@
 import asyncio
 import html
+import os
 import time
 
 from telegram import Update
@@ -112,7 +113,6 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat = update.effective_chat
     user = update.effective_user
 
-    # Attempt to immediately delete user's password message
     try:
         await update.message.delete()
     except Exception:
@@ -179,7 +179,6 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         parse_mode="HTML",
     )
 
-    # Launch background full scan & inventory sending
     asyncio.create_task(_scan_in_background(saved, force_inventory=True))
     context.user_data.clear()
     return ConversationHandler.END
@@ -355,7 +354,41 @@ def build_application() -> Application:
     return application
 
 
+def _start_render_health_server() -> None:
+    """If PORT is set (like on Render Web Services), start a minimal HTTP health-check server."""
+    port_str = os.getenv("PORT")
+    if not port_str:
+        return
+    try:
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        import threading
+
+        port = int(port_str)
+
+        class HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"UPINAR Telegram Bot is running!\n")
+
+            def do_HEAD(self):
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        print(f"[Render] Health-check HTTP server listening on port {port}")
+    except Exception as exc:
+        print(f"[Render Warning] Could not start health server on port {port_str}: {exc}")
+
+
 def run_bot() -> None:
+    _start_render_health_server()
     settings = get_settings()
     print("=" * 60)
     print("      UPINAR Notifier - Multi-Student University Bot")
