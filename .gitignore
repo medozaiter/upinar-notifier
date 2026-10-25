@@ -1,16 +1,45 @@
-# Security & Secrets (NEVER COMMIT THESE)
-config.json
+# Environment variables and secrets (CRITICAL)
+.env
+*.env
+upinar_notifier/.env
+
+# Local database and student data
+data/
+*.sqlite3
+*.db
 session_cookies.json
 seen_items.json
-*.png
-.env
+config.json
 
-# Python Cache
+# Python cache & virtual environments
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# OS Files
-Thumbs.db
-Desktop.ini
+# IDE & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
 .DS_Store
+Thumbs.db

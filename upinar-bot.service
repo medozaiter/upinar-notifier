@@ -1,0 +1,21 @@
+[Unit]
+Description=UPINAR University Telegram Notifier Bot
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace 'ubuntu' with your VPS username if different (e.g. root, debian)
+User=root
+# Replace with the exact absolute path to your project on the VPS
+WorkingDirectory=/root/upinar-notifier
+# Path to python virtual environment
+ExecStart=/root/upinar-notifier/venv/bin/python -m upinar_notifier run
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
