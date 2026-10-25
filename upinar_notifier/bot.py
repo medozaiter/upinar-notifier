@@ -5,6 +5,7 @@ import time
 
 from telegram import Update
 from telegram.error import InvalidToken
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -330,9 +331,18 @@ async def on_startup(application: Application) -> None:
 
 def build_application() -> Application:
     settings = get_settings()
+    request = HTTPXRequest(
+        connection_pool_size=16,
+        connect_timeout=35.0,
+        read_timeout=35.0,
+        write_timeout=35.0,
+        pool_timeout=10.0,
+        proxy=settings.telegram_proxy,
+    )
     application = (
         Application.builder()
         .token(settings.telegram_bot_token)
+        .request(request)
         .post_init(on_startup)
         .build()
     )
@@ -412,9 +422,15 @@ def run_bot() -> None:
     # Pre-flight check to verify Telegram token before initializing the polling loop
     try:
         import requests
+        proxies = (
+            {"http": settings.telegram_proxy, "https": settings.telegram_proxy}
+            if settings.telegram_proxy
+            else None
+        )
         check = requests.get(
             f"https://api.telegram.org/bot{settings.telegram_bot_token}/getMe",
-            timeout=5,
+            timeout=25,
+            proxies=proxies,
         )
         data = check.json()
         if not data.get("ok"):
@@ -432,7 +448,13 @@ def run_bot() -> None:
 
     try:
         application = build_application()
-        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            timeout=20,
+            poll_interval=0.5,
+            bootstrap_retries=10,
+        )
     except InvalidToken:
         print("\n" + "!" * 65)
         print("❌ خطأ: تم رفض توكن البوت من سيرفر تيليجرام (Invalid/Rejected Token)!")

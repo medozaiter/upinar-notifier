@@ -13,6 +13,7 @@ class Settings:
     encryption_key: str
     check_interval_minutes: int
     database_path: str
+    telegram_proxy: str | None = None
 
 
 _SETTINGS: Settings | None = None
@@ -47,11 +48,19 @@ def get_settings() -> Settings:
 
     from .paths import DATABASE_FILE
 
+    proxy = (
+        os.getenv("TELEGRAM_PROXY")
+        or os.getenv("HTTPS_PROXY")
+        or os.getenv("HTTP_PROXY")
+        or ""
+    ).strip() or None
+
     _SETTINGS = Settings(
         telegram_bot_token=token,
         encryption_key=normalize_fernet_secret(encryption_key),
         check_interval_minutes=interval,
         database_path=os.getenv("DATABASE_PATH", DATABASE_FILE).strip() or DATABASE_FILE,
+        telegram_proxy=proxy,
     )
     return _SETTINGS
 
