@@ -172,6 +172,10 @@ class SqliteAccountStore:
             (1 if active else 0, utc_now(), str(chat_id)),
         )
 
+    def delete_by_chat_id(self, chat_id: str) -> bool:
+        cursor = self.db.execute("DELETE FROM students WHERE telegram_chat_id = ?", (str(chat_id),))
+        return cursor.rowcount > 0
+
     def mark_scan(self, student_id: str, error: str | None = None) -> None:
         self.db.execute(
             "UPDATE students SET last_scan_at = ?, last_error = ?, updated_at = ? WHERE student_id = ?",
@@ -329,6 +333,10 @@ class SqliteSessionStore:
                 utc_now(),
             ),
         )
+
+    def delete(self, student_id: str) -> bool:
+        cursor = self.db.execute("DELETE FROM sessions WHERE student_id = ?", (str(student_id),))
+        return cursor.rowcount > 0
 
     def migrate_legacy_files(self) -> None:
         file_store = FileSessionStore()

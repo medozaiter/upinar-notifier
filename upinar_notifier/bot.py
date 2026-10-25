@@ -84,12 +84,13 @@ REGISTERED_HEADER = (
 HELP = (
     "📖 <b>دليل أوامر بوت يوبينار (UPINAR Notifier)</b>\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "🔹 /start — تسجيل أو تحديث بيانات الحساب والبدء\n"
+    "🔹 /start — تسجيل حساب جديد أو استئناف التنبيهات\n"
     "🔹 /check — فحص فوري للمساقات للبحث عن أي تكليف جديد الآن\n"
     "🔹 /courses — عرض قائمة مساقاتك المسجلة وروابطها المباشرة\n"
     "🔹 /report — إرسال تقرير وجرد شامل لجميع المساقات والمحتويات\n"
     "🔹 /status — عرض حالة المراقبة وموعد الفحص القادم\n"
     "🔹 /stop — إيقاف التنبيهات الدورية مؤقتاً\n"
+    "🔹 /logout — تسجيل الخروج وحذف بيانات الحساب بأمان\n"
     "🔹 /cancel — إلغاء خطوة التسجيل الحالية\n"
     "🔹 /help — عرض هذه المساعدة ودليل الأوامر\n\n"
     "⏱️ <b>المراقبة الدورية:</b> يقوم البوت بالفحص التلقائي كل <b>12 ساعة</b> وإرسال إشعار فوري عند أي جديد.\n"
@@ -98,16 +99,52 @@ HELP = (
 
 # Rate Limiting & Concurrency Tracker per Student
 USER_ACTIVITY: Dict[str, Dict] = {}
-GLOBAL_COMMAND_COOLDOWN = 4.0        # At least 4 seconds between ANY command from same student (anti-burst)
+GLOBAL_COMMAND_COOLDOWN = 5.0        # At least 5 seconds between ANY command from same student
 CHECK_COOLDOWN_SECONDS = 900         # 15 minutes cooldown between manual /check
 REPORT_COOLDOWN_SECONDS = 1200       # 20 minutes cooldown between full /report
 COURSES_COOLDOWN_SECONDS = 180       # 3 minutes cooldown between /courses
 STATUS_COOLDOWN_SECONDS = 60         # 1 minute cooldown between /status
-WARN_SUPPRESS_SECONDS = 25.0         # Only send cooldown warning once every 25 seconds to prevent spam flood
+WARN_SUPPRESS_SECONDS = 15.0         # Cooldown warning throttle to prevent flood
+
+
+def get_global_burst_remaining(chat_id: str) -> int:
+    now = time.time()
+    last_any = USER_ACTIVITY.get(chat_id, {}).get("last_any_command", 0)
+    elapsed = now - last_any
+    if elapsed < GLOBAL_COMMAND_COOLDOWN:
+        return max(1, int(GLOBAL_COMMAND_COOLDOWN - elapsed))
+    return 0
+
+
+def format_remaining_time(seconds: int) -> str:
+    if seconds >= 60:
+        mins = seconds // 60
+        secs = seconds % 60
+        if secs > 0:
+            return f"{mins} دقيقة و {secs} ثانية"
+        return f"{mins} دقيقة"
+    return f"{seconds} ثانية"
+
+
+def format_arabic_datetime(iso_str: str | None) -> str:
+    if not iso_str:
+        return "لم يتم بعد"
+    try:
+        from datetime import datetime, timezone, timedelta
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        palestine_tz = timezone(timedelta(hours=3))
+        local_dt = dt.astimezone(palestine_tz)
+        period = "ص" if local_dt.hour < 12 else "م"
+        hour_12 = local_dt.hour % 12
+        if hour_12 == 0:
+            hour_12 = 12
+        return f"<code>{local_dt.year}-{local_dt.month:02d}-{local_dt.day:02d} | {hour_12:02d}:{local_dt.minute:02d} {period}</code>"
+    except Exception:
+        return f"<code>{iso_str}</code>"
 
 
 def check_global_burst(chat_id: str) -> bool:
-    """Returns True if the request should be silently dropped (burst clicks within 4s)."""
+    """Returns True if the request should be silently dropped (burst clicks within cooldown)."""
     now = time.time()
     last_any = USER_ACTIVITY.get(chat_id, {}).get("last_any_command", 0)
     if now - last_any < GLOBAL_COMMAND_COOLDOWN:
@@ -156,9 +193,55 @@ def record_user_action(chat_id: str, action: str) -> None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message or not update.effective_chat:
+        return ConversationHandler.END
+
+    chat_id = str(update.effective_chat.id)
+    burst_rem = get_global_burst_remaining(chat_id)
+    if burst_rem > 0:
+        if not should_suppress_warning(chat_id, "burst"):
+            await update.message.reply_text(
+                f"⏳ <b>مهلاً يا بطل!</b> يرجى الانتظار <b>{burst_rem} ثوانٍ</b> قبل إرسال أمر جديد لتجنب الضغط.",
+                parse_mode="HTML"
+            )
+        return ConversationHandler.END
+
+    record_user_action(chat_id, "last_any_command")
     context.user_data.clear()
-    if update.message:
-        await update.message.reply_text(WELCOME, parse_mode="HTML")
+
+    db = get_database()
+    settings = get_settings()
+    row = db.accounts.get_row_by_chat_id(chat_id)
+
+    if row:
+        student_id = row["student_id"]
+        # If the student had previously stopped monitoring, reactivate it now!
+        if not row["is_active"]:
+            db.accounts.set_active(chat_id, True)
+            status_text = "🟢 تم إعادة تفعيل التنبيهات الدورية لحسابك بنجاح!"
+        else:
+            status_text = "🟢 حسابك مفعّل والتنبيهات الدورية قيد التشغيل."
+
+        welcome_back = (
+            f"👋 <b>أهلاً بك يا <code>{html.escape(student_id)}</code>!</b> 🎓\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"✅ <b>حسابك مسجل ومربوط بالفعل في البوت، ولا حاجة لإعادة إدخال بياناتك.</b>\n"
+            f"🔔 <b>المراقبة التلقائية:</b> {status_text}\n"
+            f"⏱️ <b>دورة الفحص:</b> {format_interval(settings.check_interval_minutes)}\n\n"
+            "💡 <b>الأوامر المتاحة لك:</b>\n"
+            "• /check — فحص مساقاتك الآن للبحث عن أي جديد\n"
+            "• /courses — استعراض قائمة مساقاتك المسجلة\n"
+            "• /report — تقرير وجرد شامل لكافة المحتويات\n"
+            "• /status — حالة المراقبة وآخر فحص\n"
+            "• /stop — إيقاف التنبيهات الدورية مؤقتاً\n"
+            "• /help — دليل الأوامر والمساعدة\n\n"
+            "🔄 <i>إذا أردت تسجيل الخروج أو ربط رقم جامعي آخر، أرسل: /logout</i>"
+        )
+        await update.message.reply_text(welcome_back, parse_mode="HTML")
+        return ConversationHandler.END
+
+    # New student: prompt for student ID
+    await update.message.reply_text(WELCOME, parse_mode="HTML")
     return ASK_STUDENT_ID
 
 
@@ -299,8 +382,15 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.message or not update.effective_chat:
         return
     chat_id = str(update.effective_chat.id)
-    if check_global_burst(chat_id):
+    burst_rem = get_global_burst_remaining(chat_id)
+    if burst_rem > 0:
+        if not should_suppress_warning(chat_id, "burst"):
+            await update.message.reply_text(
+                f"⏳ <b>مهلاً يا بطل!</b> يرجى الانتظار <b>{burst_rem} ثوانٍ</b> قبل إرسال أمر جديد لتجنب الضغط.",
+                parse_mode="HTML"
+            )
         return
+    record_user_action(chat_id, "last_any_command")
 
     db = get_database()
     settings = get_settings()
@@ -325,7 +415,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     record_user_action(chat_id, "last_status")
     student_id = row["student_id"]
     active_str = "🟢 مفعّلة وتعمل تلقائياً" if row["is_active"] else "🔴 متوقفة مؤقتاً"
-    last_scan = row["last_scan_at"] or "لم يتم بعد"
+    last_scan = format_arabic_datetime(row["last_scan_at"])
     tracked_count = db.seen.count(student_id)
 
     msg = (
@@ -339,7 +429,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "💡 <i>أوامر سريعة:</i>\n"
         "• /check — فحص يدوي للمساقات الآن (كل 15 دقيقة)\n"
         "• /courses — قائمة المواد المسجلة\n"
-        "• /report — تقرير الجرد الكامل"
+        "• /report — تقرير الجرد الكامل\n"
+        "• /logout — تسجيل الخروج وربط حساب جديد"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -348,8 +439,15 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.message or not update.effective_chat:
         return
     chat_id = str(update.effective_chat.id)
-    if check_global_burst(chat_id):
+    burst_rem = get_global_burst_remaining(chat_id)
+    if burst_rem > 0:
+        if not should_suppress_warning(chat_id, "burst"):
+            await update.message.reply_text(
+                f"⏳ <b>مهلاً يا بطل!</b> يرجى الانتظار <b>{burst_rem} ثوانٍ</b> قبل إرسال أمر جديد لتجنب الضغط.",
+                parse_mode="HTML"
+            )
         return
+    record_user_action(chat_id, "last_any_command")
 
     db = get_database()
     account = db.accounts.load_by_chat_id(chat_id)
@@ -364,7 +462,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if is_user_busy(chat_id):
         if not should_suppress_warning(chat_id, "busy"):
             await update.message.reply_text(
-                "⏳ <b>جاري فحص مساقاتك بالفعل الآن!</b>\n"
+                "⏳ <b>جاري تنفيذ طلبك السابق حالياً...</b>\n"
                 "يرجى الانتظار لحظات حتى تنتهي عملية الفحص الجارية لتجنب الضغط على خوادم الجامعة.",
                 parse_mode="HTML"
             )
@@ -373,10 +471,10 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     remaining = get_cooldown_remaining(chat_id, "last_check", CHECK_COOLDOWN_SECONDS)
     if remaining > 0:
         if not should_suppress_warning(chat_id, "check"):
-            minutes = (remaining // 60) + 1
+            time_str = format_remaining_time(remaining)
             await update.message.reply_text(
                 f"⏳ <b>مهلاً! لقد قمت بالفحص قبل قليل.</b>\n"
-                f"لتجنب حظر حسابك والضغط على سيرفرات الجامعة، يمكنك الفحص اليدوي مجدداً بعد <b>{minutes} دقيقة</b>.\n\n"
+                f"لتجنب حظر حسابك والضغط على سيرفرات الجامعة، يمكنك الفحص اليدوي مجدداً بعد <b>{time_str}</b>.\n\n"
                 "💡 <i>تذكير: البوت يقوم بفحص مساقاتك تلقائياً كل 12 ساعة وسينبهك فور نزول أي واجب أو ملف جديد دون تدخل منك.</i>",
                 parse_mode="HTML"
             )
@@ -422,8 +520,15 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not update.message or not update.effective_chat:
         return
     chat_id = str(update.effective_chat.id)
-    if check_global_burst(chat_id):
+    burst_rem = get_global_burst_remaining(chat_id)
+    if burst_rem > 0:
+        if not should_suppress_warning(chat_id, "burst"):
+            await update.message.reply_text(
+                f"⏳ <b>مهلاً يا بطل!</b> يرجى الانتظار <b>{burst_rem} ثوانٍ</b> قبل إرسال أمر جديد لتجنب الضغط.",
+                parse_mode="HTML"
+            )
         return
+    record_user_action(chat_id, "last_any_command")
 
     db = get_database()
     account = db.accounts.load_by_chat_id(chat_id)
@@ -435,18 +540,28 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
+    if is_user_busy(chat_id):
+        if not should_suppress_warning(chat_id, "busy"):
+            await update.message.reply_text(
+                "⏳ <b>جاري تنفيذ طلبك السابق حالياً...</b>\n"
+                "يرجى الانتظار لحظات حتى تكتمل العملية الجارية.",
+                parse_mode="HTML"
+            )
+        return
+
     remaining = get_cooldown_remaining(chat_id, "last_courses", COURSES_COOLDOWN_SECONDS)
     if remaining > 0:
         if not should_suppress_warning(chat_id, "courses"):
-            minutes = (remaining // 60) + 1
+            time_str = format_remaining_time(remaining)
             await update.message.reply_text(
                 f"⏳ <b>مهلاً! لقد قمت بعرض المساقات قبل قليل.</b>\n"
-                f"يرجى الانتظار <b>{minutes} دقيقة</b> قبل إعادة طلب القائمة لتجنب إجهاد خوادم الجامعة.\n\n"
+                f"يرجى الانتظار <b>{time_str}</b> قبل إعادة طلب القائمة لتجنب إجهاد خوادم الجامعة.\n\n"
                 "💡 <i>يمكنك مراجعة القائمة السابقة في المحادثة بالأعلى دون الحاجة لإعادة طلبها.</i>",
                 parse_mode="HTML"
             )
         return
 
+    set_user_busy(chat_id, True)
     status_msg = await update.message.reply_text("📚 <b>جاري جلب قائمة مساقاتك المسجلة...</b>", parse_mode="HTML")
     try:
         auth = MoodleAuth(session_store=db.sessions)
@@ -488,14 +603,23 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as exc:
         print(f"[Courses Command Error] {exc}")
         await status_msg.edit_text(f"⚠️ حدث خطأ أثناء جلب المساقات: {exc}")
+    finally:
+        set_user_busy(chat_id, False)
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_chat:
         return
     chat_id = str(update.effective_chat.id)
-    if check_global_burst(chat_id):
+    burst_rem = get_global_burst_remaining(chat_id)
+    if burst_rem > 0:
+        if not should_suppress_warning(chat_id, "burst"):
+            await update.message.reply_text(
+                f"⏳ <b>مهلاً يا بطل!</b> يرجى الانتظار <b>{burst_rem} ثوانٍ</b> قبل إرسال أمر جديد لتجنب الضغط.",
+                parse_mode="HTML"
+            )
         return
+    record_user_action(chat_id, "last_any_command")
 
     db = get_database()
     account = db.accounts.load_by_chat_id(chat_id)
@@ -519,10 +643,10 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     remaining = get_cooldown_remaining(chat_id, "last_report", REPORT_COOLDOWN_SECONDS)
     if remaining > 0:
         if not should_suppress_warning(chat_id, "report"):
-            minutes = (remaining // 60) + 1
+            time_str = format_remaining_time(remaining)
             await update.message.reply_text(
                 f"⏳ <b>تم إرسال تقرير الجرد مؤخراً!</b>\n"
-                f"لتفادي إرهاق خوادم الجامعة، يمكنك طلب تقرير جديد بعد <b>{minutes} دقيقة</b>.\n\n"
+                f"لتفادي إرهاق خوادم الجامعة، يمكنك طلب تقرير جديد بعد <b>{time_str}</b>.\n\n"
                 "💡 <i>لعرض أسماء المواد المسجلة فقط بشكل سريع وبدون انتظار، أرسل: /courses</i>",
                 parse_mode="HTML"
             )
@@ -540,11 +664,53 @@ async def stop_monitoring(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not update.message or not update.effective_chat:
         return
     chat_id = str(update.effective_chat.id)
-    if check_global_burst(chat_id):
+    burst_rem = get_global_burst_remaining(chat_id)
+    if burst_rem > 0:
         return
+    record_user_action(chat_id, "last_any_command")
 
     db = get_database()
     row = db.accounts.get_row_by_chat_id(chat_id)
+    if not row:
+        await update.message.reply_text("لا يوجد حساب مرتبط بهذه المحادثة. أرسل /start للبدء.")
+        return
+    db.accounts.set_active(chat_id, False)
+    await update.message.reply_text(
+        "⏸️ <b>تم إيقاف التنبيهات الدورية لحسابك بنجاح.</b>\n"
+        "لن تصلك أي إشعارات تلقائية حتى تقوم بإعادة تفعيلها بإرسال /start في أي وقت تشاء.",
+        parse_mode="HTML"
+    )
+
+
+async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_chat:
+        return
+    chat_id = str(update.effective_chat.id)
+    burst_rem = get_global_burst_remaining(chat_id)
+    if burst_rem > 0:
+        return
+    record_user_action(chat_id, "last_any_command")
+
+    db = get_database()
+    row = db.accounts.get_row_by_chat_id(chat_id)
+    if not row:
+        await update.message.reply_text("أنت غير مسجل بالأساس! أرسل /start لتسجيل حسابك الجديد.")
+        return
+
+    student_id = row["student_id"]
+    db.accounts.delete_by_chat_id(chat_id)
+    try:
+        db.sessions.delete(student_id)
+    except Exception:
+        pass
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        f"🚪 <b>تم تسجيل الخروج بنجاح!</b>\n"
+        f"تم مسح بيانات الطالب <code>{html.escape(student_id)}</code> من البوت بأمان.\n\n"
+        "لربط حساب جديد في أي وقت، أرسل: /start",
+        parse_mode="HTML"
+    )
     if not row:
         await update.message.reply_text("لا يوجد حساب مرتبط بهذه المحادثة. أرسل /start للبدء.")
         return
@@ -621,6 +787,7 @@ async def unknown_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         "🔹 /report — جرد كامل وشامل لجميع الواجبات والمحتويات\n"
         "🔹 /status — حالة المراقبة وموعد الفحص القادم\n"
         "🔹 /stop — إيقاف التنبيهات الدورية مؤقتاً\n"
+        "🔹 /logout — تسجيل الخروج وربط حساب جديد\n"
         "🔹 /help — دليل استخدام البوت والمساعدة",
         parse_mode="HTML"
     )
@@ -648,12 +815,13 @@ async def on_startup(application: Application) -> None:
     application.bot_data["monitor_task"] = asyncio.create_task(monitor_loop(application))
     try:
         commands = [
-            BotCommand("start", "تسجيل أو تحديث الحساب والبدء"),
+            BotCommand("start", "بدء الاستخدام أو استئناف التنبيهات"),
             BotCommand("check", "فحص مساقاتك الآن للبحث عن أي جديد"),
             BotCommand("courses", "عرض قائمة مساقاتك المسجلة"),
             BotCommand("report", "جرد شامل لجميع المحتويات والواجبات"),
             BotCommand("status", "حالة المراقبة وموعد الفحص القادم"),
             BotCommand("stop", "إيقاف التنبيهات الدورية مؤقتاً"),
+            BotCommand("logout", "تسجيل الخروج وحذف الحساب"),
             BotCommand("help", "دليل استخدام البوت والمساعدة"),
         ]
         await application.bot.set_my_commands(commands)
@@ -695,6 +863,13 @@ def build_application() -> Application:
         fallbacks=[
             CommandHandler("start", start),
             CommandHandler("cancel", cancel),
+            CommandHandler("help", help_command),
+            CommandHandler("status", status_command),
+            CommandHandler("check", check_command),
+            CommandHandler("report", report_command),
+            CommandHandler("courses", courses_command),
+            CommandHandler("stop", stop_monitoring),
+            CommandHandler("logout", logout_command),
         ],
         allow_reentry=True,
     )
@@ -706,6 +881,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("courses", courses_command))
     application.add_handler(CommandHandler("stop", stop_monitoring))
+    application.add_handler(CommandHandler("logout", logout_command))
 
     # Reject unsupported media (photos, videos, audio, documents, stickers, animations)
     unsupported_media = (
