@@ -188,7 +188,12 @@ class MoodleAuth:
                 if reason:
                     return False, reason
             else:
-                return False, f"استجابة غير متوقعة من بوابة الطالب (HTTP {r_post.status_code})"
+                body_snippet = r_post.text[:250].replace("\n", " ").strip()
+                server_hdr = r_post.headers.get("server", "").lower()
+                print(f"[Portal POST Error] HTTP {r_post.status_code} (Server: {server_hdr}): {body_snippet}")
+                if "cloudflare" in server_hdr or "just a moment" in body_snippet.lower() or "attention required" in body_snippet.lower():
+                    return False, "جدار الحماية (Cloudflare) في الجامعة حجب الاتصال القادم من خادم Render (HTTP 403). جرب تشغيل البوت على جهازك للتأكد."
+                return False, f"استجابة غير متوقعة من بوابة الطالب (HTTP {r_post.status_code}): {body_snippet or server_hdr}"
 
             # 3. Now that we are logged in to the portal, open UPINAR login page
             print("[Portal Step 3/4] Opening UPINAR login page...")
@@ -205,7 +210,6 @@ class MoodleAuth:
                 return False, "لم يتم العثور على رابط تسجيل الدخول ببوابة الطالب داخل اليوبينار."
 
             # 4. Follow "Log in with بوابة الطالب" SSO link
-            # Since the session already has Portal cookies, it authorizes and redirects to upinar.edu.ps/my/
             print(f"[Portal Step 4/4] Following SSO link: {oauth_link}...")
             r_sso = session.get(oauth_link, timeout=45, allow_redirects=True)
             print(f"[Portal Step 4/4] SSO finished at: {r_sso.url}")
