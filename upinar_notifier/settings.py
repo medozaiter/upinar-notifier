@@ -40,11 +40,11 @@ def get_settings() -> Settings:
         )
 
     encryption_key = ensure_fernet_key(os.getenv("ENCRYPTION_KEY", ""))
-    interval_raw = os.getenv("CHECK_INTERVAL_MINUTES", "30")
+    interval_raw = os.getenv("CHECK_INTERVAL_MINUTES", "720")
     try:
         interval = max(1, int(interval_raw))
     except ValueError:
-        interval = 30
+        interval = 720
 
     from .paths import DATABASE_FILE
 

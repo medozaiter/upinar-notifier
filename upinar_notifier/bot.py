@@ -56,11 +56,25 @@ LOGIN_FAILED = (
     "يرجى التأكد من بيانات الدخول وإرسال /start للمحاولة من جديد."
 )
 
+def format_interval(minutes: int) -> str:
+    if minutes >= 60 and minutes % 60 == 0:
+        hours = minutes // 60
+        if hours == 1:
+            return "كل ساعة"
+        elif hours == 2:
+            return "كل ساعتين"
+        elif 3 <= hours <= 10:
+            return f"كل {hours} ساعات"
+        else:
+            return f"كل {hours} ساعة"
+    return f"كل {minutes} دقيقة"
+
+
 REGISTERED_HEADER = (
     "✅ <b>تم التحقق وتفعيل الحساب بنجاح!</b>\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "🎓 الرقم الجامعي: <code>{student_id}</code>\n"
-    "🔔 دورة المراقبة: <b>كل {interval} دقيقة</b>\n\n"
+    "🔔 دورة المراقبة: <b>{interval_str}</b>\n\n"
     "🔍 <i>جاري الآن فحص مساقاتك وجلب الواجبات، الشباتر، والمحاضرات لأول مرة... "
     "سنرسل لك تقريراً شاملاً ومرتباً بالأسفل خلال لحظات 🚀</i>"
 )
@@ -180,7 +194,7 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         chat_id=chat.id,
         text=REGISTERED_HEADER.format(
             student_id=html.escape(saved.student_id),
-            interval=settings.check_interval_minutes,
+            interval_str=format_interval(settings.check_interval_minutes),
         ),
         parse_mode="HTML",
     )
@@ -238,7 +252,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"🔔 <b>المراقبة:</b> {active_str}\n"
         f"📦 <b>العناصر المأرشفة:</b> {tracked_count} عنصر\n"
         f"⏱️ <b>آخر فحص:</b> {last_scan}\n"
-        f"🔄 <b>دورة الفحص:</b> كل {settings.check_interval_minutes} دقيقة\n\n"
+        f"🔄 <b>دورة الفحص:</b> {format_interval(settings.check_interval_minutes)}\n\n"
         "💡 للفحص الفوري الآن: /check\n"
         "💡 لعرض تقرير المحتوى: /report"
     )
