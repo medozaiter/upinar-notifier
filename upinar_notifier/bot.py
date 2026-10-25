@@ -389,6 +389,14 @@ def _start_render_health_server() -> None:
 
 def run_bot() -> None:
     _start_render_health_server()
+
+    # Ensure an active asyncio event loop exists in MainThread (required in Python 3.10+ / Linux / Render)
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     settings = get_settings()
     print("=" * 60)
     print("      UPINAR Notifier - Multi-Student University Bot")
@@ -425,4 +433,6 @@ def run_bot() -> None:
         print("الرجاء التأكد من وضع التوكن الصحيح الذي أنشأته من @BotFather داخل ملف .env")
         print("!" * 65 + "\n")
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         print(f"\n[Bot Error] {exc}")
