@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: upinar-notifier-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m upinar_notifier run
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: CHECK_INTERVAL_MINUTES
+        value: "30"
