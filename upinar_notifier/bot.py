@@ -771,6 +771,15 @@ def run_bot() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
+    from .paths import BASE_DIR
+    pid_file = os.path.join(BASE_DIR, "data", "bot.pid")
+    try:
+        os.makedirs(os.path.dirname(pid_file), exist_ok=True)
+        with open(pid_file, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
     settings = get_settings()
     print("=" * 60)
     print("      UPINAR Notifier - Multi-Student University Bot")
@@ -822,3 +831,11 @@ def run_bot() -> None:
         import traceback
         traceback.print_exc()
         print(f"\n[Bot Error] {exc}")
+    finally:
+        try:
+            if os.path.exists(pid_file):
+                with open(pid_file, "r", encoding="utf-8") as f:
+                    if f.read().strip() == str(os.getpid()):
+                        os.remove(pid_file)
+        except Exception:
+            pass
