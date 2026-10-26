@@ -109,7 +109,8 @@ def start_service() -> bool:
         print("💡 لإيقاف البوت:              python -m upinar_notifier stop")
         return True
 
-    python_exe = sys.executable
+    python_exe = _get_short_path(sys.executable)
+    base_dir = _get_short_path(BASE_DIR)
 
     flags = 0
     if sys.platform.startswith("win"):
@@ -120,7 +121,7 @@ def start_service() -> bool:
 
     proc = subprocess.Popen(
         [python_exe, "-u", "-m", "upinar_notifier", "run", "--service"],
-        cwd=BASE_DIR,
+        cwd=base_dir,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
@@ -229,6 +230,19 @@ def _get_startup_folder() -> Optional[str]:
     return None
 
 
+def _get_short_path(path: str) -> str:
+    """Returns 8.3 short ASCII path on Windows to avoid legacy Unicode path issues in VBScript/wscript."""
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(500)
+            if ctypes.windll.kernel32.GetShortPathNameW(path, buf, 500):
+                return buf.value
+        except Exception:
+            pass
+    return path
+
+
 def install_autostart() -> bool:
     """Configures the bot to launch automatically when the user logs into Windows."""
     if not sys.platform.startswith("win"):
@@ -241,16 +255,17 @@ def install_autostart() -> bool:
         return False
 
     vbs_path = os.path.join(startup_folder, "UPINAR_Bot_Autostart.vbs")
-    python_exe = sys.executable
+    python_exe = _get_short_path(sys.executable)
+    base_dir = _get_short_path(BASE_DIR)
 
     vbs_content = (
         'Set WshShell = CreateObject("WScript.Shell")\n'
-        f'WshShell.CurrentDirectory = "{BASE_DIR}"\n'
+        f'WshShell.CurrentDirectory = "{base_dir}"\n'
         f'WshShell.Run """{python_exe}"" -m upinar_notifier start", 0, False\n'
     )
 
     try:
-        with open(vbs_path, "w", encoding="utf-8") as f:
+        with open(vbs_path, "w", encoding="ascii") as f:
             f.write(vbs_content)
         print("=" * 60)
         print("  ⚡ تم تفعيل التشغيل التلقائي مع الويندوز بنجاح!")

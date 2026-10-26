@@ -797,7 +797,7 @@ async def monitor_loop(application: Application) -> None:
     settings = get_settings()
     interval_seconds = settings.check_interval_minutes * 60
     print(f"[Monitor] Background checker configured: every {settings.check_interval_minutes} minutes ({format_interval(settings.check_interval_minutes)}).")
-    await asyncio.sleep(10)
+    await asyncio.sleep(60)
     while True:
         started = time.time()
         try:
@@ -962,7 +962,10 @@ def run_bot() -> None:
     print(f"      Monitoring interval: every {settings.check_interval_minutes} minutes ({format_interval(settings.check_interval_minutes)})")
     print("=" * 60)
 
-    # Pre-flight check to verify Telegram token before initializing the polling loop
+    # Wait for network connectivity (vital on system boot while Wi-Fi connects)
+    _wait_for_network(settings.telegram_bot_token)
+
+    # Pre-flight check to verify Telegram token
     try:
         import requests
         proxies = (
@@ -981,7 +984,6 @@ def run_bot() -> None:
             print("❌ خطأ: تم رفض توكن البوت من سيرفر تيليجرام (Invalid/Rejected Token)!")
             print(f"السبب: {data.get('description', 'Unauthorized')}")
             print("الرجاء وضع التوكن الصحيح الذي أنشأته من @BotFather داخل ملف .env")
-            print("مثال: TELEGRAM_BOT_TOKEN=123456789:ABCdefGhIJKlmNoPQRstuVWXyz")
             print("!" * 65 + "\n")
             return
         bot_info = data.get("result", {})
@@ -989,29 +991,54 @@ def run_bot() -> None:
     except Exception as exc:
         print(f"[Warning] Could not perform pre-flight token check: {exc}")
 
-    try:
-        application = build_application()
-        application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            timeout=20,
-            poll_interval=0.5,
-            bootstrap_retries=10,
-        )
-    except InvalidToken:
-        print("\n" + "!" * 65)
-        print("❌ خطأ: تم رفض توكن البوت من سيرفر تيليجرام (Invalid/Rejected Token)!")
-        print("الرجاء التأكد من وضع التوكن الصحيح الذي أنشأته من @BotFather داخل ملف .env")
-        print("!" * 65 + "\n")
-    except Exception as exc:
-        import traceback
-        traceback.print_exc()
-        print(f"\n[Bot Error] {exc}")
-    finally:
+    # Resilient polling loop with auto-reconnect on network drops
+    while True:
         try:
-            if os.path.exists(pid_file):
-                with open(pid_file, "r", encoding="utf-8") as f:
-                    if f.read().strip() == str(os.getpid()):
-                        os.remove(pid_file)
+            application = build_application()
+            application.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=False,
+                timeout=20,
+                poll_interval=0.5,
+                bootstrap_retries=-1,
+            )
+            break
+        except InvalidToken:
+            print("\n" + "!" * 65)
+            print("❌ خطأ: تم رفض توكن البوت من سيرفر تيليجرام (Invalid/Rejected Token)!")
+            print("الرجاء التأكد من وضع التوكن الصحيح الذي أنشأته من @BotFather داخل ملف .env")
+            print("!" * 65 + "\n")
+            break
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            print(f"\n[Bot Network Error] {exc}. Reconnecting in 5 seconds...")
+            time.sleep(5)
+            _wait_for_network(settings.telegram_bot_token, max_wait=60)
+        finally:
+            try:
+                if os.path.exists(pid_file):
+                    with open(pid_file, "r", encoding="utf-8") as f:
+                        if f.read().strip() == str(os.getpid()):
+                            os.remove(pid_file)
+            except Exception:
+                pass
+
+
+def _wait_for_network(bot_token: str, max_wait: int = 120) -> bool:
+    """Waits until DNS resolution and HTTP connectivity to Telegram are established."""
+    import socket, requests
+    print("[Network] Checking internet connection to Telegram...")
+    start = time.time()
+    while time.time() - start < max_wait:
+        try:
+            socket.getaddrinfo("api.telegram.org", 443)
+            r = requests.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=10)
+            if r.status_code in (200, 401, 404):
+                print("[Network] Internet connection confirmed active.")
+                return True
         except Exception:
             pass
+        time.sleep(3)
+    print("[Network Warning] Network check timed out; attempting startup anyway.")
+    return False
