@@ -192,10 +192,31 @@ def record_user_action(chat_id: str, action: str) -> None:
     USER_ACTIVITY[chat_id][action] = time.time()
 
 
+async def notify_if_delayed(update: Update) -> None:
+    """If the student's message was sent while the laptop was offline, send a polite catch-up notice."""
+    if not update.message or not update.message.date:
+        return
+    try:
+        from datetime import datetime, timezone
+        age = (datetime.now(timezone.utc) - update.message.date).total_seconds()
+        if age > 90:  # Message was waiting for more than 1.5 minutes while bot was off
+            chat_id = str(update.effective_chat.id)
+            if not should_suppress_warning(chat_id, "delayed_notice"):
+                await update.message.reply_text(
+                    "⚡ <b>مرحباً بك!</b>\n"
+                    "نعتذر عن التأخير؛ كان خادم البوت في وضع الاستراحة/الصيانة المؤقتة أثناء إغلاق الجهاز.\n"
+                    "تم استئناف الخدمة بنجاح وجاري تنفيذ طلبك الآن 🚀",
+                    parse_mode="HTML"
+                )
+    except Exception:
+        pass
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message or not update.effective_chat:
         return ConversationHandler.END
 
+    await notify_if_delayed(update)
     chat_id = str(update.effective_chat.id)
     burst_rem = get_global_burst_remaining(chat_id)
     if burst_rem > 0:
@@ -381,6 +402,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_chat:
         return
+    await notify_if_delayed(update)
     chat_id = str(update.effective_chat.id)
     burst_rem = get_global_burst_remaining(chat_id)
     if burst_rem > 0:
@@ -438,6 +460,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_chat:
         return
+    await notify_if_delayed(update)
     chat_id = str(update.effective_chat.id)
     burst_rem = get_global_burst_remaining(chat_id)
     if burst_rem > 0:
@@ -519,6 +542,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_chat:
         return
+    await notify_if_delayed(update)
     chat_id = str(update.effective_chat.id)
     burst_rem = get_global_burst_remaining(chat_id)
     if burst_rem > 0:
@@ -610,6 +634,7 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_chat:
         return
+    await notify_if_delayed(update)
     chat_id = str(update.effective_chat.id)
     burst_rem = get_global_burst_remaining(chat_id)
     if burst_rem > 0:
@@ -775,6 +800,7 @@ async def unknown_command_handler(update: Update, context: ContextTypes.DEFAULT_
 async def unknown_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_chat:
         return
+    await notify_if_delayed(update)
     if check_global_burst(str(update.effective_chat.id)):
         return
     await update.message.reply_text(
