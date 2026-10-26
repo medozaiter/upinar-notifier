@@ -22,6 +22,28 @@ from .models import StudentAccount, clean_student_id
 from .runtime import get_scan_service, scan_all_active
 from .settings import get_settings
 
+
+async def safe_send_message(bot, chat_id, text: str, parse_mode: str = "HTML", retries: int = 3):
+    """Sends a Telegram message with automatic retries on transient network drops."""
+    for attempt in range(retries):
+        try:
+            return await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        except Exception as exc:
+            if attempt < retries - 1:
+                import asyncio
+                await asyncio.sleep(1.0)
+            else:
+                print(f"[Bot Send Warning] Delivery to {chat_id} failed: {exc}")
+                return None
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prevents uncaught network exceptions from freezing conversation handlers."""
+    err_str = str(context.error)
+    if 'ConnectError' in err_str or 'NetworkError' in err_str or 'timeout' in err_str.lower():
+        print(f"[Network Warning] Transient Telegram drop: {err_str}")
+    else:
+        print(f"[Bot Exception Handler] {context.error}")
+
 ASK_STUDENT_ID, ASK_PASSWORD = range(2)
 
 WELCOME = (
@@ -280,7 +302,12 @@ async def receive_student_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ASK_STUDENT_ID
 
     context.user_data["student_id"] = student_id
-    await update.message.reply_text(ASK_PASSWORD_MSG, parse_mode="HTML")
+    confirmation = (
+        f"✅ <b>تم التعرف على رقمك الجامعي:</b> <code>{html.escape(student_id)}</code>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        + ASK_PASSWORD_MSG
+    )
+    await safe_send_message(context.bot, update.effective_chat.id, confirmation, parse_mode="HTML")
     return ASK_PASSWORD
 
 
@@ -308,7 +335,7 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data.clear()
         return ConversationHandler.END
 
-    student_id = str(context.user_data.get("student_id", "")).strip()
+    student_id = clean_student_id(context.user_data.get("student_id", ""))
     if not student_id:
         await context.bot.send_message(chat_id=chat.id, text=LOGIN_FAILED, parse_mode="HTML")
         context.user_data.clear()
@@ -342,7 +369,7 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"⚠️ <b>السبب:</b> {html.escape(error_detail or 'الرقم الجامعي أو كلمة المرور غير صحيحة.')}\n\n"
             "يرجى التأكد من بيانات الدخول وإرسال /start للمحاولة من جديد."
         )
-        await context.bot.send_message(chat_id=chat.id, text=fail_msg, parse_mode="HTML")
+        await safe_send_message(context.bot, chat.id, fail_msg, parse_mode="HTML")
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -926,6 +953,7 @@ def build_application() -> Application:
 
     # Handle arbitrary non-command text
     application.add_handler(MessageHandler(filters.TEXT, unknown_text_handler))
+    application.add_error_handler(global_error_handler)
 
     return application
 
