@@ -197,7 +197,7 @@ class MoodleAuth:
 
         # 2. Submit credentials to Portal
         print("[Portal Step 2/4] Submitting student credentials...")
-        r_post = m_session.post(
+        r_post = session.post(
             PORTAL_LOGIN,
             json=payload,
             headers=post_headers,
