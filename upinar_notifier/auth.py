@@ -147,6 +147,7 @@ class MoodleAuth:
         return False, "تعذر تسجيل الدخول إلى بوابة الطالب."
 
     def _attempt_portal_and_sso(self, session: requests.Session, student_id: str, password: str) -> Tuple[bool, str]:
+        session.cookies.clear()
         # 1. Fetch portal login page
         print("[Portal Step 1/4] GET https://students.up.edu.ps/login...")
         session.headers.update(CHROME_HEADERS)
