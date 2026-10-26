@@ -2,9 +2,10 @@ import asyncio
 import html
 import os
 import time
+from collections import defaultdict
 from typing import Dict
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import InvalidToken
 from telegram.request import HTTPXRequest
 from telegram.ext import (
@@ -18,9 +19,31 @@ from telegram.ext import (
 
 from .auth import MoodleAuth
 from .db import get_database
-from .models import StudentAccount
+from .models import StudentAccount, clean_student_id
 from .runtime import get_scan_service, scan_all_active
 from .settings import get_settings
+
+
+async def safe_send_message(bot, chat_id, text: str, parse_mode: str = "HTML", retries: int = 3):
+    """Sends a Telegram message with automatic retries on transient network drops."""
+    for attempt in range(retries):
+        try:
+            return await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        except Exception as exc:
+            if attempt < retries - 1:
+                import asyncio
+                await asyncio.sleep(1.0)
+            else:
+                print(f"[Bot Send Warning] Delivery to {chat_id} failed: {exc}")
+                return None
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prevents uncaught network exceptions from freezing conversation handlers."""
+    err_str = str(context.error)
+    if 'ConnectError' in err_str or 'NetworkError' in err_str or 'timeout' in err_str.lower():
+        print(f"[Network Warning] Transient Telegram drop: {err_str}")
+    else:
+        print(f"[Bot Exception Handler] {context.error}")
 
 ASK_STUDENT_ID, ASK_PASSWORD = range(2)
 
@@ -29,6 +52,8 @@ WELCOME = (
     "━━━━━━━━━━━━━━━━━━\n"
     "هذا البوت مخصص لطلاب <b>جامعة فلسطين</b> لمتابعة مساقات الموديل (اليوبينار UPINAR) تلقائياً، "
     "وإرسال إشعارات فورية بكل واجب، كويز، محاضرة، إعلان، أو شبتر جديد.\n\n"
+    "⭐ <b>دعم وتقييم المشروع:</b>\n"
+    "إذا أعجبك البوت وساعدك، يسعدنا جداً دعمك بوضع نجمة (Star) للمشروع على GitHub عبر الزر أدناه 🌟\n\n"
     "📌 <b>الخطوة [1/2]:</b>\n"
     "من فضلك أرسل <b>رقمك الجامعي</b> للمتابعة:"
 )
@@ -99,6 +124,16 @@ HELP = (
 
 # Rate Limiting & Concurrency Tracker per Student
 USER_ACTIVITY: Dict[str, Dict] = {}
+
+GITHUB_REPO_URL = "https://github.com/medozaiter/upinar-notifier"
+USER_LOCKS: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def get_github_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ ادعم المشروع بنجمة (Star) على GitHub ⭐", url=GITHUB_REPO_URL)]
+    ])
+
 GLOBAL_COMMAND_COOLDOWN = 5.0        # At least 5 seconds between ANY command from same student
 CHECK_COOLDOWN_SECONDS = 900         # 15 minutes cooldown between manual /check
 REPORT_COOLDOWN_SECONDS = 1200       # 20 minutes cooldown between full /report
@@ -262,7 +297,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
 
     # New student: prompt for student ID
-    await update.message.reply_text(WELCOME, parse_mode="HTML")
+    await update.message.reply_text(WELCOME, parse_mode="HTML", reply_markup=get_github_keyboard())
     return ASK_STUDENT_ID
 
 
@@ -270,7 +305,7 @@ async def receive_student_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not update.message or not update.message.text:
         return ASK_STUDENT_ID
 
-    student_id = update.message.text.strip()
+    student_id = clean_student_id(update.message.text)
     if not student_id or not student_id.isdigit():
         await update.message.reply_text(ASK_ID_AGAIN, parse_mode="HTML")
         return ASK_STUDENT_ID
@@ -280,7 +315,12 @@ async def receive_student_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ASK_STUDENT_ID
 
     context.user_data["student_id"] = student_id
-    await update.message.reply_text(ASK_PASSWORD_MSG, parse_mode="HTML")
+    confirmation = (
+        f"✅ <b>تم التعرف على رقمك الجامعي:</b> <code>{html.escape(student_id)}</code>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        + ASK_PASSWORD_MSG
+    )
+    await safe_send_message(context.bot, update.effective_chat.id, confirmation, parse_mode="HTML")
     return ASK_PASSWORD
 
 
@@ -308,7 +348,7 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data.clear()
         return ConversationHandler.END
 
-    student_id = str(context.user_data.get("student_id", "")).strip()
+    student_id = clean_student_id(context.user_data.get("student_id", ""))
     if not student_id:
         await context.bot.send_message(chat_id=chat.id, text=LOGIN_FAILED, parse_mode="HTML")
         context.user_data.clear()
@@ -342,7 +382,7 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"⚠️ <b>السبب:</b> {html.escape(error_detail or 'الرقم الجامعي أو كلمة المرور غير صحيحة.')}\n\n"
             "يرجى التأكد من بيانات الدخول وإرسال /start للمحاولة من جديد."
         )
-        await context.bot.send_message(chat_id=chat.id, text=fail_msg, parse_mode="HTML")
+        await safe_send_message(context.bot, chat.id, fail_msg, parse_mode="HTML")
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -482,11 +522,12 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    if is_user_busy(chat_id):
+    lock = USER_LOCKS[chat_id]
+    if lock.locked() or is_user_busy(chat_id):
         if not should_suppress_warning(chat_id, "busy"):
             await update.message.reply_text(
-                "⏳ <b>جاري تنفيذ طلبك السابق حالياً...</b>\n"
-                "يرجى الانتظار لحظات حتى تنتهي عملية الفحص الجارية لتجنب الضغط على خوادم الجامعة.",
+                "⏳ <b>لديك طلب قيد المعالجة حالياً!</b>\n"
+                "يرجى الانتظار بضع ثوانٍ حتى تكتمل العملية الجارية قبل إرسال أمر جديد 🛡️",
                 parse_mode="HTML"
             )
         return
@@ -564,11 +605,12 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    if is_user_busy(chat_id):
+    lock = USER_LOCKS[chat_id]
+    if lock.locked() or is_user_busy(chat_id):
         if not should_suppress_warning(chat_id, "busy"):
             await update.message.reply_text(
-                "⏳ <b>جاري تنفيذ طلبك السابق حالياً...</b>\n"
-                "يرجى الانتظار لحظات حتى تكتمل العملية الجارية.",
+                "⏳ <b>لديك طلب قيد المعالجة حالياً!</b>\n"
+                "يرجى الانتظار بضع ثوانٍ حتى تكتمل العملية الجارية قبل إرسال أمر جديد 🛡️",
                 parse_mode="HTML"
             )
         return
@@ -656,11 +698,12 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    if is_user_busy(chat_id):
+    lock = USER_LOCKS[chat_id]
+    if lock.locked() or is_user_busy(chat_id):
         if not should_suppress_warning(chat_id, "busy"):
             await update.message.reply_text(
-                "⏳ <b>جاري إعداد تقريرك بالفعل الآن!</b>\n"
-                "يرجى الانتظار لحظات حتى تكتمل العملية الجارية.",
+                "⏳ <b>لديك طلب قيد المعالجة حالياً!</b>\n"
+                "يرجى الانتظار بضع ثوانٍ حتى تكتمل العملية الجارية قبل إرسال أمر جديد 🛡️",
                 parse_mode="HTML"
             )
         return
@@ -851,8 +894,18 @@ async def on_startup(application: Application) -> None:
             BotCommand("help", "دليل استخدام البوت والمساعدة"),
         ]
         await application.bot.set_my_commands(commands)
+        desc = (
+            "🎓 مرحباً بك في بوت يوبينار جامعة فلسطين (UPINAR Notifier)!\n\n"
+            "هذا البوت مخصص لطلاب الجامعة لمتابعة منصة الموديل (UPINAR) وإرسال تنبيهات فورية بكل واجب أو كويز أو محاضرة جديدة 🚀\n\n"
+            "⭐ ادعم المشروع بنجمة (Star) على GitHub:\n"
+            "https://github.com/medozaiter/upinar-notifier"
+        )
+        await application.bot.set_my_description(description=desc)
+        await application.bot.set_my_short_description(
+            short_description="بوت يوبينار جامعة فلسطين لمتابعة المحاضرات والواجبات 🎓 | ادعمنا بنجمة على GitHub!"
+        )
     except Exception as exc:
-        print(f"[Bot Warning] Failed to set bot commands menu: {exc}")
+        print(f"[Bot Warning] Failed to set bot commands/description menu: {exc}")
     print("[Bot] Telegram bot service started successfully. Listening for student commands...")
 
 
@@ -926,6 +979,7 @@ def build_application() -> Application:
 
     # Handle arbitrary non-command text
     application.add_handler(MessageHandler(filters.TEXT, unknown_text_handler))
+    application.add_error_handler(global_error_handler)
 
     return application
 

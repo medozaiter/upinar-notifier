@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 import requests
 from bs4 import BeautifulSoup
 
-from .models import SessionStore, StudentAccount
+from .models import SessionStore, StudentAccount, clean_student_id
 from .net import create_robust_session
 from .storage import FileSessionStore
 
@@ -25,6 +25,20 @@ CHROME_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
 }
+
+
+def _safe_get_cookie(cookie_jar, name: str) -> str:
+    """Safely extracts a cookie value by name, avoiding CookieConflictError when multiple domains/paths exist."""
+    try:
+        val = cookie_jar.get(name, "")
+        if val:
+            return val
+    except Exception:
+        pass
+    for cookie in cookie_jar:
+        if getattr(cookie, "name", "") == name:
+            return getattr(cookie, "value", "")
+    return ""
 
 
 class MoodleAuth:
@@ -70,7 +84,7 @@ class MoodleAuth:
         return ok
 
     def login_with_feedback(self, session: requests.Session, account: StudentAccount) -> Tuple[bool, str]:
-        student_id = str(account.student_id).strip()
+        student_id = clean_student_id(account.student_id)
         password = str(account.password).strip()
 
         if not student_id or not password:
@@ -156,7 +170,7 @@ class MoodleAuth:
             if match:
                 inertia_version = match.group(1)
 
-        xsrf_cookie = session.cookies.get("XSRF-TOKEN", "")
+        xsrf_cookie = _safe_get_cookie(session.cookies, "XSRF-TOKEN")
         xsrf_token = urllib.parse.unquote(xsrf_cookie) if xsrf_cookie else ""
 
         post_headers = {
@@ -182,7 +196,7 @@ class MoodleAuth:
 
         # 2. Submit credentials to Portal
         print("[Portal Step 2/4] Submitting student credentials...")
-        r_post = session.post(
+        r_post = m_session.post(
             PORTAL_LOGIN,
             json=payload,
             headers=post_headers,
@@ -291,7 +305,7 @@ class MoodleAuth:
             else:
                 post_data["approve"] = "1"
 
-            xsrf_cookie = session.cookies.get("XSRF-TOKEN", "")
+            xsrf_cookie = _safe_get_cookie(session.cookies, "XSRF-TOKEN")
             xsrf_token = urllib.parse.unquote(xsrf_cookie) if xsrf_cookie else ""
             headers = {
                 "Origin": "https://students.up.edu.ps",
@@ -313,7 +327,8 @@ class MoodleAuth:
 
     def _login_via_direct_moodle(self, session: requests.Session, student_id: str, password: str) -> Tuple[bool, str]:
         try:
-            r_get = session.get(UPINAR_LOGIN, timeout=30)
+            m_session = create_robust_session()
+            r_get = m_session.get(UPINAR_LOGIN, timeout=30)
             if r_get.status_code != 200:
                 return False, f"تعذر فتح صفحة الموديل (HTTP {r_get.status_code})"
 
@@ -332,7 +347,7 @@ class MoodleAuth:
                 "Referer": UPINAR_LOGIN,
             }
 
-            r_post = session.post(
+            r_post = m_session.post(
                 UPINAR_LOGIN,
                 data=post_data,
                 headers=headers,
@@ -340,7 +355,8 @@ class MoodleAuth:
                 allow_redirects=True,
             )
 
-            if self.is_logged_in(session):
+            if self.is_logged_in(m_session):
+                session.cookies.update(m_session.cookies)
                 print("[SUCCESS] Fully logged into UPINAR via direct login form!")
                 return True, ""
 

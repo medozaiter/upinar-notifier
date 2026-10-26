@@ -1,5 +1,16 @@
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Protocol, Set
+
+
+def clean_student_id(raw_id: str) -> str:
+    """Normalizes Eastern Arabic/Persian digits to standard ASCII digits and strips non-digits."""
+    if not raw_id:
+        return ""
+    trans = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+    cleaned = str(raw_id).translate(trans)
+    return re.sub(r"\D", "", cleaned)
+
 
 
 PLACEHOLDER_VALUES = {
@@ -18,6 +29,10 @@ class StudentAccount:
     telegram_bot_token: str = ""
     check_interval_minutes: int = 30
     is_active: bool = True
+
+    def __post_init__(self):
+        if self.student_id:
+            self.student_id = clean_student_id(self.student_id)
 
     def is_complete(self) -> bool:
         fields = [
