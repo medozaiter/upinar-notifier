@@ -27,7 +27,7 @@ def send_student_inventory(
         "إليك ملخص شامل بجميع الواجبات، الكويزات، الشباتر، المحاضرات، والإعلانات الحالية:"
     )
     notifier.send(account, intro_message)
-    time.sleep(1.0)
+    time.sleep(1.5)
 
     # Group items by course_id
     items_by_course: Dict[str, List[ContentItem]] = defaultdict(list)
@@ -53,11 +53,16 @@ def send_student_inventory(
         forums = grouped.get("forum", []) + grouped.get("forum_post", [])
 
         safe_title = html.escape(course.title or f"مساق #{course.id}")
-        safe_url = html.escape(course.url or "#")
+        raw_course_url = (course.url or "").strip()
+        if raw_course_url.startswith("http://") or raw_course_url.startswith("https://"):
+            safe_course_url = html.escape(raw_course_url)
+            course_link_line = f"🔗 <a href='{safe_course_url}'>فتح صفحة المساق في اليوبينار</a>\n"
+        else:
+            course_link_line = ""
 
         card = (
             f"📖 <b>[{index}/{len(courses)}] {safe_title}</b>\n"
-            f"🔗 <a href='{safe_url}'>فتح صفحة المساق في اليوبينار</a>\n"
+            f"{course_link_line}"
             "━━━━━━━━━━━━━━━━━━\n"
         )
 
@@ -81,16 +86,17 @@ def send_student_inventory(
             card += _section("📢 <b>الإعلانات والمنتديات:</b>", forums, limit=8)
 
         notifier.send(account, card)
-        time.sleep(1.2)
+        time.sleep(1.8)
 
     # Conclusion message
     completion_message = (
-        "✅ <b>اكتمل فحص وأرشفة جميع مساقاتك بنجاح!</b>\n\n"
-        "🔔 تم تفعيل نظام المراقبة الدورية لحسابك.\n"
+        "✅ <b>اكتمل إرسال تقرير جميع مساقاتك بنجاح!</b>\n\n"
+        "🔔 نظام المراقبة التلقائية نشط على حسابك.\n"
         "بمجرد أن يضيف أي دكتور واجباً جديداً، كويزاً، إعلاناً، أو ملفاً للمساق، "
         "سيصلك إشعار فوري هنا تلقائياً 🚀\n\n"
         "💡 أوامر مفيدة:\n"
         "/check — فحص فوري للمساقات الآن\n"
+        "/courses — قائمة المساقات المسجلة\n"
         "/report — إعادة إرسال هذا التقرير الشامل\n"
         "/status — استعراض حالة المراقبة"
     )
@@ -104,8 +110,12 @@ def _section(heading: str, items: List[ContentItem], limit: int = 0) -> str:
     visible = items if not limit else items[:limit]
     for item in visible:
         safe_title = html.escape(item.title or "عنصر")
-        safe_url = html.escape(item.url or "#")
-        block += f"• <a href='{safe_url}'>{safe_title}</a>\n"
+        raw_url = (item.url or "").strip()
+        if raw_url.startswith("http://") or raw_url.startswith("https://"):
+            safe_url = html.escape(raw_url)
+            block += f"• <a href='{safe_url}'>{safe_title}</a>\n"
+        else:
+            block += f"• {safe_title}\n"
     if limit and len(items) > limit:
         block += f"<i>...والمزيد في صفحة المساق ({len(items) - limit} عنصر إضافي)</i>\n"
     return block + "\n"

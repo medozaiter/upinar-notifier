@@ -1,4 +1,5 @@
 import html
+import re
 import time
 from typing import List
 
@@ -54,7 +55,7 @@ def chunk_text(text: str, max_chars: int = 3900) -> List[str]:
 
 
 def send_telegram_message(bot_token: str, chat_id: str, text: str) -> bool:
-    """Send a message (or chunked messages) to a Telegram chat safely."""
+    """Send a message (or chunked messages) to a Telegram chat safely with rate-limit retries."""
     if not bot_token or not chat_id or not text.strip():
         print("[Telegram] Bot token, chat_id or text is missing.")
         return False
@@ -68,12 +69,12 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str) -> bool:
         if not sent:
             overall_ok = False
         if len(chunks) > 1:
-            time.sleep(0.3)
+            time.sleep(0.8)
 
     return overall_ok
 
 
-def _send_single_chunk(url: str, chat_id: str, chunk: str) -> bool:
+def _send_single_chunk(url: str, chat_id: str, chunk: str, max_retries: int = 3) -> bool:
     payload = {
         "chat_id": chat_id,
         "text": chunk,
@@ -81,34 +82,50 @@ def _send_single_chunk(url: str, chat_id: str, chunk: str) -> bool:
         "disable_web_page_preview": False,
     }
 
-    try:
-        response = requests.post(url, json=payload, timeout=20)
-        data = response.json()
-        if data.get("ok"):
-            return True
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, json=payload, timeout=25)
+            data = response.json()
+            if data.get("ok"):
+                return True
 
-        description = data.get("description", "")
-        # If user blocked bot, don't crash
-        if "bot was blocked by the user" in description.lower():
-            print(f"[Telegram Notice] Student {chat_id} has blocked the bot.")
-            return False
+            description = str(data.get("description", ""))
+            status_code = response.status_code
 
-        # If HTML parse error occurred, retry as plain text
-        if "can't parse entities" in description.lower() or "parse" in description.lower():
-            print("[Telegram Warning] HTML parsing failed; retrying as plain text...")
-            plain_payload = {
-                "chat_id": chat_id,
-                "text": chunk,
-                "disable_web_page_preview": False,
-            }
-            retry_res = requests.post(url, json=plain_payload, timeout=20)
-            return retry_res.json().get("ok", False)
+            # If user blocked bot, don't retry
+            if "bot was blocked by the user" in description.lower():
+                print(f"[Telegram Notice] Student {chat_id} has blocked the bot.")
+                return False
 
-        print(f"[Telegram Error] HTTP {response.status_code}: {description}")
-        return False
-    except Exception as exc:
-        print(f"[Telegram Exception] {exc}")
-        return False
+            # Rate limit handling (HTTP 429 Too Many Requests)
+            if status_code == 429 or "too many requests" in description.lower():
+                retry_after = data.get("parameters", {}).get("retry_after", 3)
+                print(f"[Telegram RateLimit] Chat {chat_id} rate-limited. Waiting {retry_after}s (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(retry_after + 1)
+                continue
+
+            # If HTML parsing or malformed entities / URLs failed, strip tags and send as clean plaintext
+            if status_code == 400 or "parse" in description.lower() or "url" in description.lower():
+                print(f"[Telegram Warning] Entity/URL error: '{description}'. Retrying as clean plaintext...")
+                clean_text = re.sub(r"<[^>]+>", "", chunk)
+                plain_payload = {
+                    "chat_id": chat_id,
+                    "text": clean_text,
+                    "disable_web_page_preview": True,
+                }
+                retry_res = requests.post(url, json=plain_payload, timeout=25)
+                retry_data = retry_res.json()
+                if retry_data.get("ok"):
+                    return True
+                print(f"[Telegram Plaintext Retry Failed] {retry_data.get('description')}")
+
+            print(f"[Telegram Error] HTTP {status_code}: {description}")
+            time.sleep(1.5)
+        except Exception as exc:
+            print(f"[Telegram Exception] {exc} (attempt {attempt + 1}/{max_retries})")
+            time.sleep(2.0)
+
+    return False
 
 
 def format_item_alert(course_name: str, item_type: str, item_title: str, item_url: str) -> str:
@@ -128,7 +145,13 @@ def format_item_alert(course_name: str, item_type: str, item_title: str, item_ur
 
     safe_course = html.escape(course_name or "المساق")
     safe_title = html.escape(item_title or "عنصر بدون عنوان")
-    safe_url = html.escape(item_url or "#")
+    raw_url = (item_url or "").strip()
+
+    if raw_url.startswith("http://") or raw_url.startswith("https://"):
+        safe_url = html.escape(raw_url)
+        url_line = f"👉 <a href='{safe_url}'>اضغط هنا لفتح العنصر مباشرة</a>"
+    else:
+        url_line = "👉 <i>العنصر متاح على صفحة المساق في اليوبينار</i>"
 
     return (
         f"🔔 <b>تنبيه يوبينار جديد! (UPINAR Alert)</b>\n"
@@ -137,5 +160,5 @@ def format_item_alert(course_name: str, item_type: str, item_title: str, item_ur
         f"{type_emoji}\n"
         f"📌 <b>العنوان:</b> {safe_title}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"👉 <a href='{safe_url}'>اضغط هنا لفتح العنصر مباشرة</a>"
+        f"{url_line}"
     )

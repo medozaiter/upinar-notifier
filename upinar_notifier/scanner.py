@@ -72,6 +72,20 @@ class ScanService:
 
         # First time registration or explicit inventory request:
         if is_baseline:
+            # If not initial baseline (student was registered before) and there are new items, send individual alerts!
+            if len(seen_items) > 0 and new_items:
+                print(f"[Inventory Scan] Found {len(new_items)} new items during report for {account.student_id}. Sending alerts...")
+                for item in new_items:
+                    print(f"--> Sending instant alert: {item.course_name} | {item.title}")
+                    msg = format_item_alert(
+                        course_name=item.course_name,
+                        item_type=item.mod_type,
+                        item_title=item.title,
+                        item_url=item.url,
+                    )
+                    self.notifier.send(account, msg)
+                    time.sleep(1.5)
+
             print(
                 f"\n[Inventory Scan] Indexed {len(all_keys)} items across {len(courses)} courses for {account.student_id}."
             )
@@ -89,7 +103,7 @@ class ScanService:
             return ScanResult(
                 courses=courses,
                 items=all_items,
-                new_items=[],
+                new_items=new_items if len(seen_items) > 0 else [],
                 is_baseline=True,
                 seen_keys=all_keys,
             )
@@ -118,10 +132,9 @@ class ScanService:
             sent = self.notifier.send(account, message)
             if sent:
                 notified_keys.add(item.unique_key)
-            else:
-                print(f"[Telegram] Failed to send alert for {item.unique_key}; will retry next scan.")
-            time.sleep(1.0)
+                time.sleep(1.5)
 
+        # Only remember items that were successfully delivered
         if notified_keys:
             seen_items.update(notified_keys)
             self.seen_store.save(account.student_id, seen_items)
